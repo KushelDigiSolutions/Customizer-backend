@@ -88,7 +88,7 @@ const createTables = async () => {
         id INT AUTO_INCREMENT PRIMARY KEY,
         user_id INT NOT NULL,
         sq VARCHAR(255) NOT NULL,
-        design_name VARCHAR(255) NOT NULL,
+        design_name VARCHAR(255) NULL,
         product_type ENUM('2d', '3d') DEFAULT '2d',
         tab_settings JSON DEFAULT ('{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
         layers_design JSON,
@@ -764,7 +764,7 @@ app.get('/api/layerdesigns/by-sq/:sq', auth, requireSuperAdmin, async (req, res)
       designName: design.design_name,
       productType: design.product_type,
       tabSettings: JSON.parse(design.tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: JSON.parse(design.layers_design || 'null'),
+      layersDesign: design.layers_design ? JSON.parse(design.layers_design) : null,
       customizableData: JSON.parse(design.customizable_data || '[]')
     }));
     console.log('Formatted designs:', formattedDesigns);
@@ -775,20 +775,30 @@ app.get('/api/layerdesigns/by-sq/:sq', auth, requireSuperAdmin, async (req, res)
   }
 });
 
-// Create a new LayerDesign
-app.post('/api/layerdesigns', auth, requireSuperAdmin, async (req, res) => {
+
+
+// Create a new Product (for initial product creation)
+app.post('/api/products', auth, requireSuperAdmin, async (req, res) => {
   try {
-    const { sq, designName, layersDesign, productType, tabSettings } = req.body;
+    const { sq, productType, tabSettings } = req.body;
+
+    // Check if product with this SQ already exists
+    const [existingProducts] = await pool.execute('SELECT * FROM layer_designs WHERE user_id = ? AND sq = ?', [req.userId, sq]);
+    if (existingProducts.length > 0) {
+      return res.status(400).json({ error: 'Product with this SQ already exists' });
+    }
+
+    // Create a new product with default design
     const [result] = await pool.execute(
       'INSERT INTO layer_designs (user_id, sq, design_name, product_type, tab_settings, layers_design, customizable_data) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [
         req.userId, 
         sq, 
-        designName, 
+        'Default Design',
         productType || '2d',
         JSON.stringify(tabSettings || {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}),
-        JSON.stringify(layersDesign || {}), 
-        JSON.stringify([])
+        JSON.stringify({}),
+        JSON.stringify([]) // Empty customizable data
       ]
     );
 
@@ -798,13 +808,54 @@ app.post('/api/layerdesigns', auth, requireSuperAdmin, async (req, res) => {
       designName: layerDesigns[0].design_name,
       productType: layerDesigns[0].product_type,
       tabSettings: JSON.parse(layerDesigns[0].tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: JSON.parse(layerDesigns[0].layers_design || 'null'),
+      layersDesign: layerDesigns[0].layers_design ? JSON.parse(layerDesigns[0].layers_design) : null,
       customizableData: JSON.parse(layerDesigns[0].customizable_data || '[]')
     };
 
-    res.status(201).json({ message: 'LayerDesign created', layerDesign });
+    res.status(201).json({ message: 'Product created successfully', layerDesign });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to create LayerDesign', details: err.message });
+    res.status(500).json({ error: 'Failed to create Product', details: err.message });
+  }
+});
+
+// Create a new LayerDesign (for additional designs for existing products)
+app.post('/api/layerdesigns', auth, requireSuperAdmin, async (req, res) => {
+  try {
+    const { sq, productType, tabSettings, designName, layersDesign } = req.body;
+
+    // Check if the product SQ exists (at least one design should exist for this SQ)
+    const [existingProducts] = await pool.execute('SELECT * FROM layer_designs WHERE user_id = ? AND sq = ?', [req.userId, sq]);
+    if (existingProducts.length === 0) {
+      return res.status(400).json({ error: 'Product with this SQ does not exist. Please create the product first.' });
+    }
+
+    // Create a new design for existing product
+    const [result] = await pool.execute(
+      'INSERT INTO layer_designs (user_id, sq, design_name, product_type, tab_settings, layers_design, customizable_data) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [
+        req.userId, 
+        sq, 
+        designName || 'New Design',
+        productType || '2d',
+        JSON.stringify(tabSettings || {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}),
+        JSON.stringify(layersDesign || {}),
+        JSON.stringify([]) // Empty customizable data
+      ]
+    );
+
+    const [layerDesigns] = await pool.execute('SELECT * FROM layer_designs WHERE id = ?', [result.insertId]);
+    const layerDesign = {
+      ...layerDesigns[0],
+      designName: layerDesigns[0].design_name,
+      productType: layerDesigns[0].product_type,
+      tabSettings: JSON.parse(layerDesigns[0].tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
+      layersDesign: layerDesigns[0].layers_design ? JSON.parse(layerDesigns[0].layers_design) : null,
+      customizableData: JSON.parse(layerDesigns[0].customizable_data || '[]')
+    };
+
+    res.status(201).json({ message: 'Design created successfully', layerDesign });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create Design', details: err.message });
   }
 });
 
@@ -817,7 +868,7 @@ app.get('/api/layerdesigns', auth, requireSuperAdmin, async (req, res) => {
       designName: design.design_name,
       productType: design.product_type,
       tabSettings: JSON.parse(design.tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: JSON.parse(design.layers_design || 'null'),
+      layersDesign: design.layers_design ? JSON.parse(design.layers_design) : null,
       customizableData: JSON.parse(design.customizable_data || '[]')
     }));
     res.json(formattedDesigns);
@@ -839,7 +890,7 @@ app.get('/api/layerdesigns/:id', auth, requireSuperAdmin, async (req, res) => {
       designName: layerDesigns[0].design_name,
       productType: layerDesigns[0].product_type,
       tabSettings: JSON.parse(layerDesigns[0].tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: JSON.parse(layerDesigns[0].layers_design || 'null'),
+      layersDesign: layerDesigns[0].layers_design ? JSON.parse(layerDesigns[0].layers_design) : null,
       customizableData: JSON.parse(layerDesigns[0].customizable_data || '[]')
     };
 
@@ -911,7 +962,7 @@ app.put('/api/layerdesigns/:id', auth, requireSuperAdmin, async (req, res) => {
       designName: layerDesigns[0].design_name,
       productType: layerDesigns[0].product_type,
       tabSettings: JSON.parse(layerDesigns[0].tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: JSON.parse(layerDesigns[0].layers_design || 'null'),
+      layersDesign: layerDesigns[0].layers_design ? JSON.parse(layerDesigns[0].layers_design) : null,
       customizableData: JSON.parse(layerDesigns[0].customizable_data || '[]')
     };
 
