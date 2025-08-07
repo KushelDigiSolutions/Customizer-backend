@@ -1160,6 +1160,8 @@ app.get('/api/layerdesigns', auth, async (req, res) => {
         sq: product.productSku,
         productName: product.productName,
         productImage: product.productImage,
+        customizerImage: product.customizerImage,
+        modelFile: product.modelFile,
         productType: product.ProductType || '2d',
         tabSettings: tabSettings,
         customizableData: customizableData,
@@ -1682,6 +1684,255 @@ app.post('/api/deactivate-expired-subscriptions', auth, async (req, res) => {
   } catch (err) {
     console.error('Error deactivating expired subscriptions:', err);
     res.status(500).json({ error: 'Failed to deactivate expired subscriptions', details: err.message });
+  }
+});
+
+// Upload customizer image for a product
+app.post('/api/products/:id/customizer-image', auth, upload.single('image'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if product exists and belongs to user
+    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file provided' });
+    }
+
+    // Upload to Cloudinary
+    const result = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'customizer-images',
+          resource_type: 'auto',
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+
+      uploadStream.end(req.file.buffer);
+    });
+
+    // Update product with customizer image URL
+    await pool.execute(
+      'UPDATE products SET customizerImage = ? WHERE id = ? AND storeHash = ?',
+      [result.secure_url, id, req.storeHash]
+    );
+
+    res.status(200).json({ 
+      message: 'Customizer image uploaded successfully',
+      imageUrl: result.secure_url
+    });
+
+  } catch (err) {
+    console.error('Error uploading customizer image:', err);
+    res.status(500).json({ error: 'Failed to upload customizer image', details: err.message });
+  }
+});
+
+// Update or remove customizer image for a product
+app.put('/api/products/:id/customizer-image', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { customizerImage } = req.body;
+    
+    // Check if product exists and belongs to user
+    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    // Update product with customizer image URL (or null to remove)
+    await pool.execute(
+      'UPDATE products SET customizerImage = ? WHERE id = ? AND storeHash = ?',
+      [customizerImage, id, req.storeHash]
+    );
+
+    res.status(200).json({ 
+      message: customizerImage ? 'Customizer image updated successfully' : 'Customizer image removed successfully',
+      imageUrl: customizerImage
+    });
+
+  } catch (err) {
+    console.error('Error updating customizer image:', err);
+    res.status(500).json({ error: 'Failed to update customizer image', details: err.message });
+  }
+});
+
+// Upload 3D model file for a product
+app.post('/api/products/:id/3d-model', auth, upload.single('model'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if product exists and belongs to user
+    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    // Check if product is 3D
+    if (products[0].ProductType !== '3d') {
+      return res.status(400).json({ error: 'This product is not a 3D product. Only 3D products can have model files.' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No model file provided' });
+    }
+
+    // Upload to Cloudinary
+    const result = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: '3d-models',
+          resource_type: 'raw', // For model files like .glb, .obj, etc.
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+
+      uploadStream.end(req.file.buffer);
+    });
+
+    // Update product with 3D model URL
+    await pool.execute(
+      'UPDATE products SET modelFile = ? WHERE id = ? AND storeHash = ?',
+      [result.secure_url, id, req.storeHash]
+    );
+
+    res.status(200).json({ 
+      message: '3D model uploaded successfully',
+      modelUrl: result.secure_url,
+      fileName: req.file.originalname
+    });
+
+  } catch (err) {
+    console.error('Error uploading 3D model:', err);
+    res.status(500).json({ error: 'Failed to upload 3D model', details: err.message });
+  }
+});
+
+// Update or remove 3D model file for a product
+app.put('/api/products/:id/3d-model', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { modelFile } = req.body;
+    
+    // Check if product exists and belongs to user
+    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    // Update product with 3D model URL (or null to remove)
+    await pool.execute(
+      'UPDATE products SET modelFile = ? WHERE id = ? AND storeHash = ?',
+      [modelFile, id, req.storeHash]
+    );
+
+    res.status(200).json({ 
+      message: modelFile ? '3D model updated successfully' : '3D model removed successfully',
+      modelUrl: modelFile
+    });
+
+  } catch (err) {
+    console.error('Error updating 3D model:', err);
+    res.status(500).json({ error: 'Failed to update 3D model', details: err.message });
+  }
+});
+
+// Developer API to fetch product data by productId and storeHash
+app.get('/api/developer/product', async (req, res) => {
+  try {
+    const { productId, storeHash } = req.query;
+    
+    if (!productId || !storeHash) {
+      return res.status(400).json({ 
+        status: false,
+        error: 'productId and storeHash are required' 
+      });
+    }
+
+    // Fetch product data
+    const [products] = await pool.execute(
+      'SELECT * FROM products WHERE productId = ? AND storeHash = ?', 
+      [productId, storeHash]
+    );
+
+    if (products.length === 0) {
+      return res.status(404).json({ 
+        status: false,
+        error: 'Product not found' 
+      });
+    }
+
+    const product = products[0];
+
+    // Check if product is visible
+    if (product.visible !== 1) {
+      return res.status(404).json({ 
+        status: false,
+        error: 'Product is not visible' 
+      });
+    }
+
+    // Parse JSON fields safely
+    let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+    let customizableData = [];
+    
+    if (product.tabSettings) {
+      try {
+        let cleanTabSettings = product.tabSettings.toString().trim();
+        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+          cleanTabSettings = cleanTabSettings.slice(1, -1);
+        }
+        tabSettings = JSON.parse(cleanTabSettings);
+      } catch (parseError) {
+        console.log('Error parsing tabSettings for product', product.id, ':', parseError.message);
+      }
+    }
+    
+    if (product.customizableData) {
+      try {
+        let cleanCustomizableData = product.customizableData.toString().trim();
+        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        }
+        customizableData = JSON.parse(cleanCustomizableData);
+      } catch (parseError) {
+        console.log('Error parsing customizableData for product', product.id, ':', parseError.message);
+      }
+    }
+
+    // Return product data excluding specified fields
+    const responseData = {
+      status: true,
+      data: {
+        ProductType: product.ProductType || '2d',
+        tabSettings: tabSettings,
+        customizableData: customizableData,
+        customizerImage: product.customizerImage,
+        modelFile: product.modelFile,
+        designName: product.designName,
+        layerDesign: product.layerDesign
+      }
+    };
+
+    res.status(200).json(responseData);
+
+  } catch (err) {
+    console.error('Error fetching product for developer:', err);
+    res.status(500).json({ 
+      status: false,
+      error: 'Failed to fetch product data', 
+      details: err.message 
+    });
   }
 });
 
