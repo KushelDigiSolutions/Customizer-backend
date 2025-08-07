@@ -23,10 +23,10 @@ app.use(express.json());
 
 // MySQL Connection Pool
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'kusheldigi_db',
+  host: process.env.DB_HOST || '13.201.29.82',
+  user: process.env.DB_USER || 'admin_customiser',
+  password: process.env.DB_PASSWORD || 'Chirag@2025',
+  database: process.env.DB_NAME || 'admin_customiser',
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
@@ -118,7 +118,7 @@ const createTables = async () => {
 };
 
 // Initialize database
-createTables();
+// createTables(); // Commented out as per user request - no new table creation needed
 
 // Test endpoint to add sample data
 app.post('/api/test/add-design', async (req, res) => {
@@ -282,6 +282,7 @@ function auth(req, res, next) {
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) return res.status(403).json({ error: 'Invalid token' });
     req.userId = decoded.userId;
+    req.storeHash = decoded.storeHash;
     next();
   });
 }
@@ -289,7 +290,7 @@ function auth(req, res, next) {
 // Helper middleware to check for superadmin
 async function requireSuperAdmin(req, res, next) {
   try {
-    const [users] = await pool.execute('SELECT role FROM users WHERE id = ?', [req.userId]);
+    const [users] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
     if (users.length === 0 || users[0].role !== 'superadmin') {
       return res.status(403).json({ error: 'Only superadmin can perform this action' });
     }
@@ -317,15 +318,51 @@ app.post('/api/save-product', async (req, res) => {
 });
 
 // GET endpoint to fetch all products
-app.get('/api/products', async (req, res) => {
+app.get('/api/products', auth, async (req, res) => {
   try {
-    const [products] = await pool.execute('SELECT * FROM products ORDER BY created_at DESC');
-    const formattedProducts = products.map(product => ({
+    const [products] = await pool.execute('SELECT * FROM products WHERE storeHash = ? ORDER BY createdAt DESC', [req.storeHash]);
+    const formattedProducts = products.map(product => {
+      let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+      let customizableData = [];
+      
+      // Safely parse tabSettings
+      if (product.tabSettings) {
+        try {
+          let cleanTabSettings = product.tabSettings.toString().trim();
+          if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+            cleanTabSettings = cleanTabSettings.slice(1, -1);
+          }
+          tabSettings = JSON.parse(cleanTabSettings);
+        } catch (parseError) {
+          console.log('Error parsing tabSettings for product', product.id, ':', parseError.message);
+        }
+      }
+      
+      // Safely parse customizableData
+      if (product.customizableData) {
+        try {
+          let cleanCustomizableData = product.customizableData.toString().trim();
+          if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+            cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+          }
+          customizableData = JSON.parse(cleanCustomizableData);
+        } catch (parseError) {
+          console.log('Error parsing customizableData for product', product.id, ':', parseError.message);
+        }
+      }
+      
+      return {
       id: product.id,
-      ...JSON.parse(product.product_data),
-      created_at: product.created_at,
-      updated_at: product.updated_at
-    }));
+        productSku: product.productSku,
+        productName: product.productName,
+        productImage: product.productImage,
+        productType: product.ProductType,
+        tabSettings: tabSettings,
+        customizableData: customizableData,
+        createdAt: product.createdAt,
+        updatedAt: product.updatedAt
+      };
+    });
     res.status(200).json(formattedProducts);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch products', details: err.message });
@@ -357,37 +394,37 @@ app.post('/api/request-otp', async (req, res) => {
   const { email, password } = req.body;
   
   try {
-    // First verify email and password
-    const [users] = await pool.execute('SELECT * FROM users WHERE email = ?', [email]);
+    // Check if user exists in loginMaster table
+    const [users] = await pool.execute('SELECT * FROM loginMaster WHERE email = ?', [email]);
     if (users.length === 0) {
       return res.status(400).json({ error: 'Invalid email or password' });
     }
     
     const user = users[0];
     
-    // Compare password
+    // If password is null (initial state), return invalid credentials
+    if (user.password === null) {
+      return res.status(400).json({ error: 'Invalid email or password' });
+    }
+    
+    // If password is not null, verify it
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(400).json({ error: 'Invalid email or password' });
     }
 
-    // Check if user is active
-    if (!user.active) {
-      return res.status(400).json({ error: 'Account is deactivated. Please contact administrator.' });
-    }
-
-    // Generate OTP
+    // Generate OTP using existing function
     const otp = generateOTP();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    // Store OTP with expiry
+    // Store OTP in memory (in production, use Redis or database)
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
     otpStore.set(email, {
       otp,
-      expiry: otpExpiry,
-      userId: user.id
+      userId: user.id,
+      expiry: otpExpiry
     });
 
-    // Send OTP via email
+    // Send OTP via email using existing function
     const emailSent = await sendOTP(email, otp);
     if (!emailSent) {
       return res.status(500).json({ error: 'Failed to send OTP. Please try again.' });
@@ -397,10 +434,9 @@ app.post('/api/request-otp', async (req, res) => {
       message: 'OTP sent successfully to your email',
       email: email 
     });
-
   } catch (err) {
-    console.error('OTP request error:', err);
-    res.status(500).json({ error: 'Server error', details: err.message });
+    console.error('Error in request-otp:', err);
+    res.status(500).json({ error: 'Failed to send OTP' });
   }
 });
 
@@ -426,16 +462,23 @@ app.post('/api/verify-otp', async (req, res) => {
       return res.status(400).json({ error: 'Invalid OTP. Please try again.' });
     }
 
-    // Get user data
-    const [users] = await pool.execute('SELECT * FROM users WHERE id = ?', [storedData.userId]);
+    // Get user data from loginMaster table
+    const [users] = await pool.execute('SELECT * FROM loginMaster WHERE id = ?', [storedData.userId]);
     if (users.length === 0) {
       return res.status(400).json({ error: 'User not found' });
     }
 
     const user = users[0];
 
-    // Generate JWT token
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '1d' });
+    // Check subscription status - only allow login if subscription is active (1)
+    if (user.subscription !== 1) {
+      return res.status(403).json({ 
+        error: 'Your subscription is inactive. Please contact administrator to activate your account.' 
+      });
+    }
+
+    // Generate JWT token with storeHash
+    const token = jwt.sign({ userId: user.id, storeHash: user.storeHash }, JWT_SECRET, { expiresIn: '1d' });
     
     // Clear OTP from store
     otpStore.delete(email);
@@ -444,11 +487,11 @@ app.post('/api/verify-otp', async (req, res) => {
       message: 'Login successful', 
       token, 
       user: { 
-        name: user.name, 
+        name: user.userName || user.email, 
         email: user.email, 
-        phone: user.phone, 
+        phone: user.phone || '', 
         id: user.id, 
-        role: user.role 
+        role: user.role || 'superadmin' // Default to superadmin
       } 
     });
 
@@ -480,25 +523,27 @@ app.post('/api/login', async (req, res) => {
 app.post('/api/register', auth, async (req, res) => {
   try {
     // Only superadmin can register users
-    const [currentUsers] = await pool.execute('SELECT role FROM users WHERE id = ?', [req.userId]);
+    const [currentUsers] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
     if (currentUsers.length === 0 || currentUsers[0].role !== 'superadmin') {
       return res.status(403).json({ error: 'Only superadmin can register users.' });
     }
 
-    const { name, email, password, phone, role } = req.body;
+    const { name, email, phone, role } = req.body;
     
     // Check if user already exists
-    const [existingUsers] = await pool.execute('SELECT id FROM users WHERE email = ?', [email]);
+    const [existingUsers] = await pool.execute('SELECT id FROM loginMaster WHERE email = ?', [email]);
     if (existingUsers.length > 0) {
       return res.status(400).json({ error: 'Email already registered' });
     }
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Generate unique userId and storeHash
+    const userId = Math.floor(Math.random() * 10000000) + 1000000;
+    const storeHash = Math.random().toString(36).substring(2, 12);
+    const accessToken = Math.random().toString(36).substring(2, 32);
     
     const [result] = await pool.execute(
-      'INSERT INTO users (name, email, password, phone, role, active) VALUES (?, ?, ?, ?, ?, TRUE)',
-      [name, email, hashedPassword, phone, role || 'user']
+      'INSERT INTO loginMaster (email, password, userId, userName, storeHash, accessToken, subscription, role, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
+      [email, null, userId, name || email, storeHash, accessToken, 0, role || 'superadmin']
     );
 
     // Send onboarding email
@@ -506,12 +551,12 @@ app.post('/api/register', auth, async (req, res) => {
       from: 'info@kusheldigi.com',
       to: email,
       subject: 'Welcome to the Platform',
-      html: `<h2>Welcome, ${name}!</h2><p>Your account has been created.</p><p><b>Email:</b> ${email}<br/><b>Password:</b> ${password}</p><p>Please login and change your password after first login.</p>`
+      html: `<h2>Welcome, ${name || email}!</h2><p>Your account has been created.</p><p><b>Email:</b> ${email}</p><p>Please use the forgot password feature to set your password.</p>`
     });
 
     res.status(201).json({ 
       message: 'User registered successfully', 
-      user: { id: result.insertId, name, email, phone, role: role || 'user' } 
+      user: { id: result.insertId, name: name || email, email, phone: phone || '', role: role || 'superadmin' } 
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error', details: err.message });
@@ -521,12 +566,12 @@ app.post('/api/register', auth, async (req, res) => {
 // Get all users (superadmin only)
 app.get('/api/users', auth, async (req, res) => {
   try {
-    const [currentUsers] = await pool.execute('SELECT role FROM users WHERE id = ?', [req.userId]);
+    const [currentUsers] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
     if (currentUsers.length === 0 || currentUsers[0].role !== 'superadmin') {
       return res.status(403).json({ error: 'Only superadmin can view users.' });
     }
 
-    const [users] = await pool.execute('SELECT id, name, email, phone, role, active, created_at, updated_at FROM users');
+    const [users] = await pool.execute('SELECT id, email, userName as name, role, createdAt as created_at, updatedAt as updated_at FROM loginMaster');
     res.status(200).json(users);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch users', details: err.message });
@@ -743,32 +788,81 @@ app.get('/api/configuration/by-store/:storeId', async (req, res) => {
 });
 
 // LAYER DESIGN ENDPOINTS
-// List all unique SQs for the user
-app.get('/api/layerdesigns/sqs', auth, requireSuperAdmin, async (req, res) => {
+// List all unique SQs for the user (now fetches from products table)
+app.get('/api/layerdesigns/sqs', auth, async (req, res) => {
   try {
-    const [sqs] = await pool.execute('SELECT DISTINCT sq FROM layer_designs WHERE user_id = ?', [req.userId]);
-    res.json(sqs.map(row => row.sq));
+    const [products] = await pool.execute('SELECT DISTINCT productSku FROM products WHERE storeHash = ?', [req.storeHash]);
+    res.json(products.map(row => row.productSku));
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch SQs', details: err.message });
   }
 });
 
-// List LayerDesigns by SQ
-app.get('/api/layerdesigns/by-sq/:sq', auth, requireSuperAdmin, async (req, res) => {
+// List LayerDesigns by SQ (now fetches from products table)
+app.get('/api/layerdesigns/by-sq/:sq', auth, async (req, res) => {
   try {
     console.log('Fetching designs for SQ:', req.params.sq, 'User ID:', req.userId);
-    const [layerDesigns] = await pool.execute('SELECT * FROM layer_designs WHERE user_id = ? AND sq = ?', [req.userId, req.params.sq]);
-    console.log('Raw designs from DB:', layerDesigns);
-    const formattedDesigns = layerDesigns.map(design => ({
-      ...design,
-      designName: design.design_name,
-      productType: design.product_type,
-      tabSettings: JSON.parse(design.tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: design.layers_design ? JSON.parse(design.layers_design) : null,
-      customizableData: JSON.parse(design.customizable_data || '[]')
-    }));
-    console.log('Formatted designs:', formattedDesigns);
-    res.json(formattedDesigns);
+    
+    // Find the product by SKU in the products table
+    const [products] = await pool.execute('SELECT * FROM products WHERE productSku = ? AND storeHash = ?', [req.params.sq, req.storeHash]);
+    
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    
+    const product = products[0];
+    console.log('Raw product from DB:', product);
+    
+    // Parse tabSettings safely
+    let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+    if (product.tabSettings) {
+      try {
+        let cleanTabSettings = product.tabSettings.toString().trim();
+        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+          cleanTabSettings = cleanTabSettings.slice(1, -1);
+        }
+        tabSettings = JSON.parse(cleanTabSettings);
+      } catch (parseError) {
+        console.log('Error parsing tabSettings for product', product.id, ':', parseError.message);
+      }
+    }
+    
+    // Parse customizableData safely
+    let customizableData = [];
+    if (product.customizableData) {
+      try {
+        let cleanCustomizableData = product.customizableData.toString().trim();
+        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        }
+        customizableData = JSON.parse(cleanCustomizableData);
+      } catch (parseError) {
+        console.log('Error parsing customizableData for product', product.id, ':', parseError.message);
+      }
+    }
+    
+    // Create a design object that matches the expected format
+    const design = {
+      id: product.id,
+      user_id: req.userId,
+      sq: product.productSku,
+      design_name: product.designName || 'Default Design',
+      product_type: product.ProductType || '2d',
+      tab_settings: JSON.stringify(tabSettings),
+      layers_design: product.layerDesign ? JSON.stringify(product.layerDesign) : null,
+      customizable_data: JSON.stringify(customizableData),
+      created_at: product.createdAt,
+      updated_at: product.updatedAt,
+      // Add the formatted fields for frontend compatibility
+      designName: product.designName || 'Default Design',
+      productType: product.ProductType || '2d',
+      tabSettings: tabSettings,
+      layersDesign: product.layerDesign || null,
+      customizableData: customizableData
+    };
+    
+    console.log('Formatted design:', design);
+    res.json([design]); // Return as array to maintain compatibility
   } catch (err) {
     console.error('Error in by-sq endpoint:', err);
     res.status(500).json({ error: 'Failed to fetch LayerDesigns', details: err.message });
@@ -777,126 +871,364 @@ app.get('/api/layerdesigns/by-sq/:sq', auth, requireSuperAdmin, async (req, res)
 
 
 
-// Create a new Product (for initial product creation)
-app.post('/api/products', auth, requireSuperAdmin, async (req, res) => {
+// Update Product tabSettings, ProductType, and visibility (users can only edit these)
+app.put('/api/products/:id', auth, async (req, res) => {
   try {
-    const { sq, productType, tabSettings } = req.body;
-
-    // Check if product with this SQ already exists
-    const [existingProducts] = await pool.execute('SELECT * FROM layer_designs WHERE user_id = ? AND sq = ?', [req.userId, sq]);
-    if (existingProducts.length > 0) {
-      return res.status(400).json({ error: 'Product with this SQ already exists' });
+    const { tabSettings, productType, visible } = req.body;
+    
+    // Get current product data
+    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
     }
 
-    // Create a new product with default design
-    const [result] = await pool.execute(
-      'INSERT INTO layer_designs (user_id, sq, design_name, product_type, tab_settings, layers_design, customizable_data) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [
-        req.userId, 
-        sq, 
-        'Default Design',
-        productType || '2d',
-        JSON.stringify(tabSettings || {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}),
-        JSON.stringify({}),
-        JSON.stringify([]) // Empty customizable data
-      ]
+    let updateFields = [];
+    let params = [];
+    
+    if (tabSettings !== undefined) {
+      updateFields.push('tabSettings = ?');
+      // Check if tabSettings is already a string or needs to be stringified
+      const tabSettingsValue = typeof tabSettings === 'string' ? tabSettings : JSON.stringify(tabSettings);
+      params.push(tabSettingsValue);
+    }
+    
+    if (productType !== undefined) {
+      updateFields.push('ProductType = ?');
+      params.push(productType);
+    }
+    
+    if (visible !== undefined) {
+      updateFields.push('visible = ?');
+      params.push(visible ? 1 : 0);
+    }
+    
+    if (updateFields.length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+    
+    params.push(req.params.id);
+    params.push(req.storeHash);
+    
+    // Update the product
+    await pool.execute(
+      `UPDATE products SET ${updateFields.join(', ')} WHERE id = ? AND storeHash = ?`,
+      params
     );
 
-    const [layerDesigns] = await pool.execute('SELECT * FROM layer_designs WHERE id = ?', [result.insertId]);
-    const layerDesign = {
-      ...layerDesigns[0],
-      designName: layerDesigns[0].design_name,
-      productType: layerDesigns[0].product_type,
-      tabSettings: JSON.parse(layerDesigns[0].tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: layerDesigns[0].layers_design ? JSON.parse(layerDesigns[0].layers_design) : null,
-      customizableData: JSON.parse(layerDesigns[0].customizable_data || '[]')
+    // Get the updated product to return
+    const [updatedProducts] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    const updatedProductData = updatedProducts[0];
+    
+    let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+    let customizableDataParsed = [];
+    
+    // Safely parse tabSettings
+    if (updatedProductData.tabSettings) {
+      try {
+        let cleanTabSettings = updatedProductData.tabSettings.toString().trim();
+        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+          cleanTabSettings = cleanTabSettings.slice(1, -1);
+        }
+        tabSettingsParsed = JSON.parse(cleanTabSettings);
+      } catch (parseError) {
+        console.log('Error parsing tabSettings for product', updatedProductData.id, ':', parseError.message);
+      }
+    }
+    
+    // Safely parse customizableData
+    if (updatedProductData.customizableData) {
+      try {
+        let cleanCustomizableData = updatedProductData.customizableData.toString().trim();
+        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        }
+        customizableDataParsed = JSON.parse(cleanCustomizableData);
+      } catch (parseError) {
+        console.log('Error parsing customizableData for product', updatedProductData.id, ':', parseError.message);
+      }
+    }
+
+    const updatedProduct = {
+      id: updatedProductData.id,
+      sq: updatedProductData.productSku,
+      productName: updatedProductData.productName,
+      productImage: updatedProductData.productImage,
+      productType: updatedProductData.ProductType || '2d',
+      tabSettings: tabSettingsParsed,
+      customizableData: customizableDataParsed,
+      visible: updatedProductData.visible === 1,
+      createdAt: updatedProductData.createdAt,
+      updatedAt: updatedProductData.updatedAt
     };
 
-    res.status(201).json({ message: 'Product created successfully', layerDesign });
+    res.json({ message: 'Product updated successfully', product: updatedProduct });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to create Product', details: err.message });
+    res.status(500).json({ error: 'Failed to update Product', details: err.message });
   }
 });
 
-// Create a new LayerDesign (for additional designs for existing products)
-app.post('/api/layerdesigns', auth, requireSuperAdmin, async (req, res) => {
+// Create/Update Product design (for layer_designs endpoint compatibility)
+app.post('/api/layerdesigns', auth, async (req, res) => {
   try {
-    const { sq, productType, tabSettings, designName, layersDesign } = req.body;
+    const { sq, designName, layersDesign, customizableData, productType, tabSettings } = req.body;
+    console.log('Received data for new design:', req.body);
 
-    // Check if the product SQ exists (at least one design should exist for this SQ)
-    const [existingProducts] = await pool.execute('SELECT * FROM layer_designs WHERE user_id = ? AND sq = ?', [req.userId, sq]);
-    if (existingProducts.length === 0) {
-      return res.status(400).json({ error: 'Product with this SQ does not exist. Please create the product first.' });
+    // Find the product by SQ in the products table
+    const [products] = await pool.execute('SELECT * FROM products WHERE productSku = ? AND storeHash = ?', [sq, req.storeHash]);
+
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
     }
 
-    // Create a new design for existing product
-    const [result] = await pool.execute(
-      'INSERT INTO layer_designs (user_id, sq, design_name, product_type, tab_settings, layers_design, customizable_data) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [
-        req.userId, 
-        sq, 
-        designName || 'New Design',
-        productType || '2d',
-        JSON.stringify(tabSettings || {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}),
-        JSON.stringify(layersDesign || {}),
-        JSON.stringify([]) // Empty customizable data
-      ]
+    const product = products[0];
+    let updateFields = [];
+    let params = [];
+    
+    // Handle all possible fields that might be sent
+    if (designName !== undefined) {
+      updateFields.push('designName = ?');
+      params.push(designName);
+    }
+    
+    if (layersDesign !== undefined) {
+      updateFields.push('layerDesign = ?');
+      const layersDesignValue = typeof layersDesign === 'string' ? layersDesign : JSON.stringify(layersDesign);
+      params.push(layersDesignValue);
+    }
+    
+    if (customizableData !== undefined) {
+      updateFields.push('customizableData = ?');
+      const customizableDataValue = typeof customizableData === 'string' ? customizableData : JSON.stringify(customizableData);
+      params.push(customizableDataValue);
+    }
+    
+    if (productType !== undefined) {
+      updateFields.push('ProductType = ?');
+      params.push(productType);
+    }
+    
+    if (tabSettings !== undefined) {
+      updateFields.push('tabSettings = ?');
+      const tabSettingsValue = typeof tabSettings === 'string' ? tabSettings : JSON.stringify(tabSettings);
+      params.push(tabSettingsValue);
+    }
+    
+    // If no fields to update, return success (might be just a design creation request)
+    if (updateFields.length === 0) {
+      console.log('No fields to update, returning existing product data');
+      // Return the existing product data
+      let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+      let customizableDataParsed = [];
+      
+      if (product.tabSettings) {
+        try {
+          let cleanTabSettings = product.tabSettings.toString().trim();
+          if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+            cleanTabSettings = cleanTabSettings.slice(1, -1);
+          }
+          tabSettingsParsed = JSON.parse(cleanTabSettings);
+        } catch (parseError) {
+          console.log('Error parsing tabSettings for product', product.id, ':', parseError.message);
+        }
+      }
+      
+      if (product.customizableData) {
+        try {
+          let cleanCustomizableData = product.customizableData.toString().trim();
+          if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+            cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+          }
+          customizableDataParsed = JSON.parse(cleanCustomizableData);
+        } catch (parseError) {
+          console.log('Error parsing customizableData for product', product.id, ':', parseError.message);
+        }
+      }
+
+      const existingProduct = {
+        id: product.id,
+        sq: product.productSku,
+        productName: product.productName,
+        productImage: product.productImage,
+        productType: product.ProductType || '2d',
+        tabSettings: tabSettingsParsed,
+        customizableData: customizableDataParsed,
+        createdAt: product.createdAt,
+        updatedAt: product.updatedAt
+      };
+
+      return res.json({ message: 'Product data retrieved successfully', product: existingProduct });
+    }
+    
+    params.push(product.id);
+    
+    // Update the product
+    await pool.execute(
+      `UPDATE products SET ${updateFields.join(', ')} WHERE id = ?`,
+      params
     );
 
-    const [layerDesigns] = await pool.execute('SELECT * FROM layer_designs WHERE id = ?', [result.insertId]);
-    const layerDesign = {
-      ...layerDesigns[0],
-      designName: layerDesigns[0].design_name,
-      productType: layerDesigns[0].product_type,
-      tabSettings: JSON.parse(layerDesigns[0].tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: layerDesigns[0].layers_design ? JSON.parse(layerDesigns[0].layers_design) : null,
-      customizableData: JSON.parse(layerDesigns[0].customizable_data || '[]')
-    };
-
-    res.status(201).json({ message: 'Design created successfully', layerDesign });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to create Design', details: err.message });
-  }
-});
-
-// Get all LayerDesigns for the logged-in user
-app.get('/api/layerdesigns', auth, requireSuperAdmin, async (req, res) => {
-  try {
-    const [layerDesigns] = await pool.execute('SELECT * FROM layer_designs WHERE user_id = ?', [req.userId]);
-    const formattedDesigns = layerDesigns.map(design => ({
-      ...design,
-      designName: design.design_name,
-      productType: design.product_type,
-      tabSettings: JSON.parse(design.tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: design.layers_design ? JSON.parse(design.layers_design) : null,
-      customizableData: JSON.parse(design.customizable_data || '[]')
-    }));
-    res.json(formattedDesigns);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch LayerDesigns', details: err.message });
-  }
-});
-
-// Get a single LayerDesign by ID
-app.get('/api/layerdesigns/:id', auth, requireSuperAdmin, async (req, res) => {
-  try {
-    const [layerDesigns] = await pool.execute('SELECT * FROM layer_designs WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
-    if (layerDesigns.length === 0) {
-      return res.status(404).json({ error: 'LayerDesign not found' });
+    // Get the updated product to return
+    const [updatedProducts] = await pool.execute('SELECT * FROM products WHERE id = ?', [product.id]);
+    const updatedProductData = updatedProducts[0];
+    
+    let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+    let customizableDataParsed = [];
+    
+    // Safely parse tabSettings
+    if (updatedProductData.tabSettings) {
+      try {
+        let cleanTabSettings = updatedProductData.tabSettings.toString().trim();
+        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+          cleanTabSettings = cleanTabSettings.slice(1, -1);
+        }
+        tabSettingsParsed = JSON.parse(cleanTabSettings);
+      } catch (parseError) {
+        console.log('Error parsing tabSettings for product', updatedProductData.id, ':', parseError.message);
+      }
+    }
+    
+    // Safely parse customizableData
+    if (updatedProductData.customizableData) {
+      try {
+        let cleanCustomizableData = updatedProductData.customizableData.toString().trim();
+        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        }
+        customizableDataParsed = JSON.parse(cleanCustomizableData);
+      } catch (parseError) {
+        console.log('Error parsing customizableData for product', updatedProductData.id, ':', parseError.message);
+      }
     }
 
-    const layerDesign = {
-      ...layerDesigns[0],
-      designName: layerDesigns[0].design_name,
-      productType: layerDesigns[0].product_type,
-      tabSettings: JSON.parse(layerDesigns[0].tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: layerDesigns[0].layers_design ? JSON.parse(layerDesigns[0].layers_design) : null,
-      customizableData: JSON.parse(layerDesigns[0].customizable_data || '[]')
+    const updatedProduct = {
+      id: updatedProductData.id,
+      sq: updatedProductData.productSku,
+      productName: updatedProductData.productName,
+      productImage: updatedProductData.productImage,
+      productType: updatedProductData.ProductType || '2d',
+      tabSettings: tabSettingsParsed,
+      customizableData: customizableDataParsed,
+      createdAt: updatedProductData.createdAt,
+      updatedAt: updatedProductData.updatedAt
     };
 
-    res.json(layerDesign);
+    res.json({ message: 'Product updated successfully', product: updatedProduct });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch LayerDesign', details: err.message });
+    res.status(500).json({ error: 'Failed to update Product', details: err.message });
+  }
+});
+
+// Get all Products for the logged-in user
+app.get('/api/layerdesigns', auth, async (req, res) => {
+  try {
+    const [products] = await pool.execute('SELECT * FROM products WHERE storeHash = ? ORDER BY createdAt DESC', [req.storeHash]);
+    const formattedProducts = products.map(product => {
+      let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+      let customizableData = [];
+      
+      // Safely parse tabSettings
+      if (product.tabSettings) {
+        try {
+          // Clean the string first - remove any extra quotes or escape characters
+          let cleanTabSettings = product.tabSettings.toString().trim();
+          if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+            cleanTabSettings = cleanTabSettings.slice(1, -1);
+          }
+          tabSettings = JSON.parse(cleanTabSettings);
+        } catch (parseError) {
+          console.log('Error parsing tabSettings for product', product.id, ':', parseError.message);
+          // Use default tabSettings if parsing fails
+        }
+      }
+      
+      // Safely parse customizableData
+      if (product.customizableData) {
+        try {
+          let cleanCustomizableData = product.customizableData.toString().trim();
+          if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+            cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+          }
+          customizableData = JSON.parse(cleanCustomizableData);
+        } catch (parseError) {
+          console.log('Error parsing customizableData for product', product.id, ':', parseError.message);
+          // Use empty array if parsing fails
+        }
+      }
+      
+      return {
+        id: product.id,
+        sq: product.productSku,
+        productName: product.productName,
+        productImage: product.productImage,
+        customizerImage: product.customizerImage,
+        modelFile: product.modelFile,
+        productType: product.ProductType || '2d',
+        tabSettings: tabSettings,
+        customizableData: customizableData,
+        visible: product.visible === 1,
+        createdAt: product.createdAt,
+        updatedAt: product.updatedAt
+      };
+    });
+    res.json(formattedProducts);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch Products', details: err.message });
+  }
+});
+
+// Get a single Product by ID
+app.get('/api/layerdesigns/:id', auth, async (req, res) => {
+  try {
+    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const productData = products[0];
+    let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+    let customizableData = [];
+    
+    // Safely parse tabSettings
+    if (productData.tabSettings) {
+      try {
+        let cleanTabSettings = productData.tabSettings.toString().trim();
+        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+          cleanTabSettings = cleanTabSettings.slice(1, -1);
+        }
+        tabSettings = JSON.parse(cleanTabSettings);
+      } catch (parseError) {
+        console.log('Error parsing tabSettings for product', productData.id, ':', parseError.message);
+      }
+    }
+    
+    // Safely parse customizableData
+    if (productData.customizableData) {
+      try {
+        let cleanCustomizableData = productData.customizableData.toString().trim();
+        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        }
+        customizableData = JSON.parse(cleanCustomizableData);
+      } catch (parseError) {
+        console.log('Error parsing customizableData for product', productData.id, ':', parseError.message);
+      }
+    }
+
+    const product = {
+      id: productData.id,
+      sq: productData.productSku,
+      productName: productData.productName,
+      productImage: productData.productImage,
+      productType: productData.ProductType || '2d',
+      tabSettings: tabSettings,
+      customizableData: customizableData,
+      createdAt: productData.createdAt,
+      updatedAt: productData.updatedAt
+    };
+
+    res.json(product);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch Product', details: err.message });
   }
 });
 
@@ -924,46 +1256,112 @@ app.delete('/api/layerdesigns/by-sq/:sq', auth, requireSuperAdmin, async (req, r
   }
 });
 
-// Update a LayerDesign (edit design name, sq, layersDesign, productType, tabSettings)
-app.put('/api/layerdesigns/:id', auth, requireSuperAdmin, async (req, res) => {
+// Update a Product design (edit design name, layersDesign, productType, tabSettings)
+app.put('/api/layerdesigns/:id', auth, async (req, res) => {
   try {
     const { sq, designName, layersDesign, customizableData, productType, tabSettings } = req.body;
     
-    let query = 'UPDATE layer_designs SET sq = ?, design_name = ?, layers_design = ?';
-    let params = [sq, designName, JSON.stringify(layersDesign)];
+    // Get current product data
+    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    let updateFields = [];
+    let params = [];
     
-    if (productType) {
-      query += ', product_type = ?';
+    if (designName !== undefined) {
+      updateFields.push('designName = ?');
+      params.push(designName);
+    }
+    
+    if (layersDesign !== undefined) {
+      updateFields.push('layerDesign = ?');
+      const layersDesignValue = typeof layersDesign === 'string' ? layersDesign : JSON.stringify(layersDesign);
+      params.push(layersDesignValue);
+    }
+    
+    if (customizableData !== undefined) {
+      updateFields.push('customizableData = ?');
+      const customizableDataValue = typeof customizableData === 'string' ? customizableData : JSON.stringify(customizableData);
+      params.push(customizableDataValue);
+    }
+    
+    if (productType !== undefined) {
+      updateFields.push('ProductType = ?');
       params.push(productType);
     }
     
-    if (tabSettings) {
-      query += ', tab_settings = ?';
-      params.push(JSON.stringify(tabSettings));
+    if (tabSettings !== undefined) {
+      updateFields.push('tabSettings = ?');
+      const tabSettingsValue = typeof tabSettings === 'string' ? tabSettings : JSON.stringify(tabSettings);
+      params.push(tabSettingsValue);
     }
     
-    if (customizableData) {
-      query += ', customizable_data = ?';
-      params.push(JSON.stringify(customizableData));
+    if (updateFields.length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
     }
     
-    query += ' WHERE id = ? AND user_id = ?';
-    params.push(req.params.id, req.userId);
+    params.push(req.params.id);
+    params.push(req.storeHash);
+    
+    // Update the product
+    await pool.execute(
+      `UPDATE products SET ${updateFields.join(', ')} WHERE id = ? AND storeHash = ?`,
+      params
+    );
 
-    const [result] = await pool.execute(query, params);
+    // Get the updated product to return
+    const [updatedProducts] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    const updatedProductData = updatedProducts[0];
     
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'LayerDesign not found' });
+    let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+    let customizableDataParsed = [];
+    
+    // Safely parse tabSettings
+    if (updatedProductData.tabSettings) {
+      try {
+        let cleanTabSettings = updatedProductData.tabSettings.toString().trim();
+        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+          cleanTabSettings = cleanTabSettings.slice(1, -1);
+        }
+        tabSettingsParsed = JSON.parse(cleanTabSettings);
+      } catch (parseError) {
+        console.log('Error parsing tabSettings for product', updatedProductData.id, ':', parseError.message);
+      }
+    }
+    
+    // Safely parse customizableData
+    if (updatedProductData.customizableData) {
+      try {
+        let cleanCustomizableData = updatedProductData.customizableData.toString().trim();
+        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        }
+        customizableDataParsed = JSON.parse(cleanCustomizableData);
+      } catch (parseError) {
+        console.log('Error parsing customizableData for product', updatedProductData.id, ':', parseError.message);
+      }
     }
 
-    const [layerDesigns] = await pool.execute('SELECT * FROM layer_designs WHERE id = ?', [req.params.id]);
+    // Create a layerDesign object that matches the expected format
     const layerDesign = {
-      ...layerDesigns[0],
-      designName: layerDesigns[0].design_name,
-      productType: layerDesigns[0].product_type,
-      tabSettings: JSON.parse(layerDesigns[0].tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: layerDesigns[0].layers_design ? JSON.parse(layerDesigns[0].layers_design) : null,
-      customizableData: JSON.parse(layerDesigns[0].customizable_data || '[]')
+      id: updatedProductData.id,
+      user_id: req.userId,
+      sq: updatedProductData.productSku,
+      design_name: updatedProductData.designName || 'Default Design',
+      product_type: updatedProductData.ProductType || '2d',
+      tab_settings: JSON.stringify(tabSettingsParsed),
+      layers_design: updatedProductData.layerDesign ? JSON.stringify(updatedProductData.layerDesign) : null,
+      customizable_data: JSON.stringify(customizableDataParsed),
+      created_at: updatedProductData.createdAt,
+      updated_at: updatedProductData.updatedAt,
+      // Add the formatted fields for frontend compatibility
+      designName: updatedProductData.designName || 'Default Design',
+      productType: updatedProductData.ProductType || '2d',
+      tabSettings: tabSettingsParsed,
+      layersDesign: updatedProductData.layerDesign || null,
+      customizableData: customizableDataParsed
     };
 
     res.json({ message: 'LayerDesign updated', layerDesign });
@@ -972,46 +1370,108 @@ app.put('/api/layerdesigns/:id', auth, requireSuperAdmin, async (req, res) => {
   }
 });
 
-// Delete a LayerDesign
-app.delete('/api/layerdesigns/:id', auth, requireSuperAdmin, async (req, res) => {
+// Delete a Product Design (clear design data but keep product)
+app.delete('/api/layerdesigns/:id', auth, async (req, res) => {
   try {
-    const [result] = await pool.execute('DELETE FROM layer_designs WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
+    // Clear the design-related data but keep the product
+    const [result] = await pool.execute(
+      'UPDATE products SET designName = NULL, layerDesign = NULL, customizableData = "[]" WHERE id = ? AND storeHash = ?', 
+      [req.params.id, req.storeHash]
+    );
     if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'LayerDesign not found' });
+      return res.status(404).json({ error: 'Product not found' });
     }
-    res.json({ message: 'LayerDesign deleted' });
+    res.json({ message: 'Product Design deleted successfully' });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to delete LayerDesign', details: err.message });
+    res.status(500).json({ error: 'Failed to delete Product Design', details: err.message });
   }
 });
 
-// Add customizable data to a LayerDesign
-app.post('/api/layerdesigns/:id/customize', auth, requireSuperAdmin, async (req, res) => {
+// Add customizable data to a Product (updated to work with products table)
+app.post('/api/layerdesigns/:id/customize', auth, async (req, res) => {
   try {
     const { title, shortDescription, files } = req.body;
     
-    // Get current customizable data
-    const [layerDesigns] = await pool.execute('SELECT customizable_data FROM layer_designs WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
-    if (layerDesigns.length === 0) {
-      return res.status(404).json({ error: 'LayerDesign not found' });
+    // Get current customizable data from products table
+    const [products] = await pool.execute('SELECT customizableData FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
     }
 
-    const currentData = JSON.parse(layerDesigns[0].customizable_data || '[]');
+    // Parse current customizable data safely
+    let currentData = [];
+    if (products[0].customizableData) {
+      try {
+        let cleanCustomizableData = products[0].customizableData.toString().trim();
+        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        }
+        currentData = JSON.parse(cleanCustomizableData);
+      } catch (parseError) {
+        console.log('Error parsing customizableData for product', req.params.id, ':', parseError.message);
+        currentData = [];
+      }
+    }
+
+    // Add new customizable data
     currentData.push({ title, shortDescription, files });
 
+    // Update the product with new customizable data
     await pool.execute(
-      'UPDATE layer_designs SET customizable_data = ? WHERE id = ? AND user_id = ?',
-      [JSON.stringify(currentData), req.params.id, req.userId]
+      'UPDATE products SET customizableData = ? WHERE id = ? AND storeHash = ?',
+      [JSON.stringify(currentData), req.params.id, req.storeHash]
     );
 
-    const [updatedDesigns] = await pool.execute('SELECT * FROM layer_designs WHERE id = ?', [req.params.id]);
+    // Get the updated product
+    const [updatedProducts] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    const updatedProduct = updatedProducts[0];
+    
+    // Parse the updated data safely
+    let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+    let customizableData = [];
+    
+    if (updatedProduct.tabSettings) {
+      try {
+        let cleanTabSettings = updatedProduct.tabSettings.toString().trim();
+        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+          cleanTabSettings = cleanTabSettings.slice(1, -1);
+        }
+        tabSettings = JSON.parse(cleanTabSettings);
+      } catch (parseError) {
+        console.log('Error parsing tabSettings for product', updatedProduct.id, ':', parseError.message);
+      }
+    }
+    
+    if (updatedProduct.customizableData) {
+      try {
+        let cleanCustomizableData = updatedProduct.customizableData.toString().trim();
+        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        }
+        customizableData = JSON.parse(cleanCustomizableData);
+      } catch (parseError) {
+        console.log('Error parsing customizableData for product', updatedProduct.id, ':', parseError.message);
+      }
+    }
+
+    // Create a layerDesign object that matches the expected format
     const layerDesign = {
-      ...updatedDesigns[0],
-      designName: updatedDesigns[0].design_name,
-      productType: updatedDesigns[0].product_type,
-      tabSettings: JSON.parse(updatedDesigns[0].tab_settings || '{"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}'),
-      layersDesign: JSON.parse(updatedDesigns[0].layers_design || 'null'),
-      customizableData: JSON.parse(updatedDesigns[0].customizable_data || '[]')
+      id: updatedProduct.id,
+      user_id: req.userId,
+      sq: updatedProduct.productSku,
+      design_name: updatedProduct.designName || 'Default Design',
+      product_type: updatedProduct.ProductType || '2d',
+      tab_settings: JSON.stringify(tabSettings),
+      layers_design: updatedProduct.layerDesign ? JSON.stringify(updatedProduct.layerDesign) : null,
+      customizable_data: JSON.stringify(customizableData),
+      created_at: updatedProduct.createdAt,
+      updated_at: updatedProduct.updatedAt,
+      // Add the formatted fields for frontend compatibility
+      designName: updatedProduct.designName || 'Default Design',
+      productType: updatedProduct.ProductType || '2d',
+      tabSettings: tabSettings,
+      layersDesign: updatedProduct.layerDesign || null,
+      customizableData: customizableData
     };
 
     res.json({ message: 'Customizable data added', layerDesign });
@@ -1042,18 +1502,15 @@ app.post('/api/forgot-password', async (req, res) => {
   const { email } = req.body;
   
   try {
-    // Check if user exists
-    const [users] = await pool.execute('SELECT * FROM users WHERE email = ?', [email]);
+    // Check if user exists in loginMaster table
+    const [users] = await pool.execute('SELECT * FROM loginMaster WHERE email = ?', [email]);
     if (users.length === 0) {
       return res.status(400).json({ error: 'No account found with this email address' });
     }
 
     const user = users[0];
 
-    // Check if user is active
-    if (!user.active) {
-      return res.status(400).json({ error: 'Account is deactivated. Please contact administrator.' });
-    }
+    // Since we don't have active field in loginMaster, we skip that check
 
     // Generate reset token
     const resetToken = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '1h' });
@@ -1169,8 +1626,8 @@ app.post('/api/reset-password', async (req, res) => {
     // Hash new password
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    // Update user password
-    await pool.execute('UPDATE users SET password = ? WHERE id = ?', [hashedPassword, storedData.userId]);
+    // Update user password in loginMaster table
+    await pool.execute('UPDATE loginMaster SET password = ? WHERE id = ?', [hashedPassword, storedData.userId]);
 
     // Clear reset token
     otpStore.delete(`reset_${email}`);
@@ -1208,7 +1665,7 @@ cron.schedule('0 0 * * *', async () => {
 // Manual API to deactivate expired subscriptions
 app.post('/api/deactivate-expired-subscriptions', auth, async (req, res) => {
   try {
-    const [currentUsers] = await pool.execute('SELECT role FROM users WHERE id = ?', [req.userId]);
+    const [currentUsers] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
     if (currentUsers.length === 0 || currentUsers[0].role !== 'superadmin') {
       return res.status(403).json({ error: 'Only superadmin can perform this action.' });
     }
@@ -1227,6 +1684,255 @@ app.post('/api/deactivate-expired-subscriptions', auth, async (req, res) => {
   } catch (err) {
     console.error('Error deactivating expired subscriptions:', err);
     res.status(500).json({ error: 'Failed to deactivate expired subscriptions', details: err.message });
+  }
+});
+
+// Upload customizer image for a product
+app.post('/api/products/:id/customizer-image', auth, upload.single('image'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if product exists and belongs to user
+    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file provided' });
+    }
+
+    // Upload to Cloudinary
+    const result = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'customizer-images',
+          resource_type: 'auto',
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+
+      uploadStream.end(req.file.buffer);
+    });
+
+    // Update product with customizer image URL
+    await pool.execute(
+      'UPDATE products SET customizerImage = ? WHERE id = ? AND storeHash = ?',
+      [result.secure_url, id, req.storeHash]
+    );
+
+    res.status(200).json({ 
+      message: 'Customizer image uploaded successfully',
+      imageUrl: result.secure_url
+    });
+
+  } catch (err) {
+    console.error('Error uploading customizer image:', err);
+    res.status(500).json({ error: 'Failed to upload customizer image', details: err.message });
+  }
+});
+
+// Update or remove customizer image for a product
+app.put('/api/products/:id/customizer-image', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { customizerImage } = req.body;
+    
+    // Check if product exists and belongs to user
+    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    // Update product with customizer image URL (or null to remove)
+    await pool.execute(
+      'UPDATE products SET customizerImage = ? WHERE id = ? AND storeHash = ?',
+      [customizerImage, id, req.storeHash]
+    );
+
+    res.status(200).json({ 
+      message: customizerImage ? 'Customizer image updated successfully' : 'Customizer image removed successfully',
+      imageUrl: customizerImage
+    });
+
+  } catch (err) {
+    console.error('Error updating customizer image:', err);
+    res.status(500).json({ error: 'Failed to update customizer image', details: err.message });
+  }
+});
+
+// Upload 3D model file for a product
+app.post('/api/products/:id/3d-model', auth, upload.single('model'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if product exists and belongs to user
+    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    // Check if product is 3D
+    if (products[0].ProductType !== '3d') {
+      return res.status(400).json({ error: 'This product is not a 3D product. Only 3D products can have model files.' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No model file provided' });
+    }
+
+    // Upload to Cloudinary
+    const result = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: '3d-models',
+          resource_type: 'raw', // For model files like .glb, .obj, etc.
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+
+      uploadStream.end(req.file.buffer);
+    });
+
+    // Update product with 3D model URL
+    await pool.execute(
+      'UPDATE products SET modelFile = ? WHERE id = ? AND storeHash = ?',
+      [result.secure_url, id, req.storeHash]
+    );
+
+    res.status(200).json({ 
+      message: '3D model uploaded successfully',
+      modelUrl: result.secure_url,
+      fileName: req.file.originalname
+    });
+
+  } catch (err) {
+    console.error('Error uploading 3D model:', err);
+    res.status(500).json({ error: 'Failed to upload 3D model', details: err.message });
+  }
+});
+
+// Update or remove 3D model file for a product
+app.put('/api/products/:id/3d-model', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { modelFile } = req.body;
+    
+    // Check if product exists and belongs to user
+    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    // Update product with 3D model URL (or null to remove)
+    await pool.execute(
+      'UPDATE products SET modelFile = ? WHERE id = ? AND storeHash = ?',
+      [modelFile, id, req.storeHash]
+    );
+
+    res.status(200).json({ 
+      message: modelFile ? '3D model updated successfully' : '3D model removed successfully',
+      modelUrl: modelFile
+    });
+
+  } catch (err) {
+    console.error('Error updating 3D model:', err);
+    res.status(500).json({ error: 'Failed to update 3D model', details: err.message });
+  }
+});
+
+// Developer API to fetch product data by productId and storeHash
+app.get('/api/developer/product', async (req, res) => {
+  try {
+    const { productId, storeHash } = req.query;
+    
+    if (!productId || !storeHash) {
+      return res.status(400).json({ 
+        status: false,
+        error: 'productId and storeHash are required' 
+      });
+    }
+
+    // Fetch product data
+    const [products] = await pool.execute(
+      'SELECT * FROM products WHERE productId = ? AND storeHash = ?', 
+      [productId, storeHash]
+    );
+
+    if (products.length === 0) {
+      return res.status(404).json({ 
+        status: false,
+        error: 'Product not found' 
+      });
+    }
+
+    const product = products[0];
+
+    // Check if product is visible
+    if (product.visible !== 1) {
+      return res.status(404).json({ 
+        status: false,
+        error: 'Product is not visible' 
+      });
+    }
+
+    // Parse JSON fields safely
+    let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+    let customizableData = [];
+    
+    if (product.tabSettings) {
+      try {
+        let cleanTabSettings = product.tabSettings.toString().trim();
+        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+          cleanTabSettings = cleanTabSettings.slice(1, -1);
+        }
+        tabSettings = JSON.parse(cleanTabSettings);
+      } catch (parseError) {
+        console.log('Error parsing tabSettings for product', product.id, ':', parseError.message);
+      }
+    }
+    
+    if (product.customizableData) {
+      try {
+        let cleanCustomizableData = product.customizableData.toString().trim();
+        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        }
+        customizableData = JSON.parse(cleanCustomizableData);
+      } catch (parseError) {
+        console.log('Error parsing customizableData for product', product.id, ':', parseError.message);
+      }
+    }
+
+    // Return product data excluding specified fields
+    const responseData = {
+      status: true,
+      data: {
+        ProductType: product.ProductType || '2d',
+        tabSettings: tabSettings,
+        customizableData: customizableData,
+        customizerImage: product.customizerImage,
+        modelFile: product.modelFile,
+        designName: product.designName,
+        layerDesign: product.layerDesign
+      }
+    };
+
+    res.status(200).json(responseData);
+
+  } catch (err) {
+    console.error('Error fetching product for developer:', err);
+    res.status(500).json({ 
+      status: false,
+      error: 'Failed to fetch product data', 
+      details: err.message 
+    });
   }
 });
 
