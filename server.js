@@ -279,24 +279,50 @@ function auth(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token provided' });
-  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+  jwt.verify(token, JWT_SECRET, async (err, decoded) => {
     if (err) return res.status(403).json({ error: 'Invalid token' });
     req.userId = decoded.userId;
     req.storeHash = decoded.storeHash;
+    
+    // Get user role from database
+    try {
+      const [users] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
+      if (users.length > 0) {
+        req.userRole = users[0].role;
+      } else {
+        req.userRole = 'superadmin'; // Default fallback
+      }
+    } catch (error) {
+      req.userRole = 'superadmin'; // Default fallback
+    }
+    
     next();
   });
 }
 
-// Helper middleware to check for superadmin
+// Helper middleware to check for superadmin or mastersuperadmin
 async function requireSuperAdmin(req, res, next) {
   try {
     const [users] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
-    if (users.length === 0 || users[0].role !== 'superadmin') {
-      return res.status(403).json({ error: 'Only superadmin can perform this action' });
+    if (users.length === 0 || (users[0].role !== 'superadmin' && users[0].role !== 'mastersuperadmin')) {
+      return res.status(403).json({ error: 'Only superadmin or mastersuperadmin can perform this action' });
     }
     next();
   } catch (error) {
-    res.status(403).json({ error: 'Only superadmin can perform this action' });
+    res.status(403).json({ error: 'Only superadmin or mastersuperadmin can perform this action' });
+  }
+}
+
+// Helper middleware to check for mastersuperadmin only
+async function requireMasterSuperAdmin(req, res, next) {
+  try {
+    const [users] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
+    if (users.length === 0 || users[0].role !== 'mastersuperadmin') {
+      return res.status(403).json({ error: 'Only mastersuperadmin can perform this action' });
+    }
+    next();
+  } catch (error) {
+    res.status(403).json({ error: 'Only mastersuperadmin can perform this action' });
   }
 }
 
@@ -320,7 +346,19 @@ app.post('/api/save-product', async (req, res) => {
 // GET endpoint to fetch all products
 app.get('/api/products', auth, async (req, res) => {
   try {
-    const [products] = await pool.execute('SELECT * FROM products WHERE storeHash = ? ORDER BY createdAt DESC', [req.storeHash]);
+    let query = 'SELECT * FROM products';
+    let params = [];
+    
+    // If user is mastersuperadmin, show all products from all storeHash
+    // If user is superadmin, show only their storeHash products
+    if (req.userRole === 'mastersuperadmin') {
+      query += ' ORDER BY createdAt DESC';
+    } else {
+      query += ' WHERE storeHash = ? ORDER BY createdAt DESC';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
     const formattedProducts = products.map(product => {
       let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
       let customizableData = [];
@@ -477,8 +515,8 @@ app.post('/api/verify-otp', async (req, res) => {
       });
     }
 
-    // Generate JWT token with storeHash
-    const token = jwt.sign({ userId: user.id, storeHash: user.storeHash }, JWT_SECRET, { expiresIn: '1d' });
+    // Generate JWT token with storeHash and role
+    const token = jwt.sign({ userId: user.id, storeHash: user.storeHash, role: user.role }, JWT_SECRET, { expiresIn: '1d' });
     
     // Clear OTP from store
     otpStore.delete(email);
@@ -522,10 +560,10 @@ app.post('/api/login', async (req, res) => {
 // User registration API endpoint (only superadmin)
 app.post('/api/register', auth, async (req, res) => {
   try {
-    // Only superadmin can register users
+    // Only superadmin or mastersuperadmin can register users
     const [currentUsers] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
-    if (currentUsers.length === 0 || currentUsers[0].role !== 'superadmin') {
-      return res.status(403).json({ error: 'Only superadmin can register users.' });
+    if (currentUsers.length === 0 || (currentUsers[0].role !== 'superadmin' && currentUsers[0].role !== 'mastersuperadmin')) {
+      return res.status(403).json({ error: 'Only superadmin or mastersuperadmin can register users.' });
     }
 
     const { name, email, phone, role } = req.body;
@@ -567,8 +605,8 @@ app.post('/api/register', auth, async (req, res) => {
 app.get('/api/users', auth, async (req, res) => {
   try {
     const [currentUsers] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
-    if (currentUsers.length === 0 || currentUsers[0].role !== 'superadmin') {
-      return res.status(403).json({ error: 'Only superadmin can view users.' });
+    if (currentUsers.length === 0 || (currentUsers[0].role !== 'superadmin' && currentUsers[0].role !== 'mastersuperadmin')) {
+      return res.status(403).json({ error: 'Only superadmin or mastersuperadmin can view users.' });
     }
 
     const [users] = await pool.execute('SELECT id, email, userName as name, role, createdAt as created_at, updatedAt as updated_at FROM loginMaster');
@@ -581,13 +619,13 @@ app.get('/api/users', auth, async (req, res) => {
 // Update user (superadmin only)
 app.put('/api/users/:id', auth, async (req, res) => {
   try {
-    const [currentUsers] = await pool.execute('SELECT role FROM users WHERE id = ?', [req.userId]);
-    if (currentUsers.length === 0 || currentUsers[0].role !== 'superadmin') {
-      return res.status(403).json({ error: 'Only superadmin can update users.' });
+    const [currentUsers] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
+    if (currentUsers.length === 0 || (currentUsers[0].role !== 'superadmin' && currentUsers[0].role !== 'mastersuperadmin')) {
+      return res.status(403).json({ error: 'Only superadmin or mastersuperadmin can update users.' });
     }
 
     const { name, email, phone, password } = req.body;
-    let query = 'UPDATE users SET name = ?, email = ?, phone = ?';
+    let query = 'UPDATE loginMaster SET userName = ?, email = ?, phoneNumber = ?';
     let params = [name, email, phone];
     let passwordChanged = false;
 
@@ -604,7 +642,7 @@ app.put('/api/users/:id', auth, async (req, res) => {
     await pool.execute(query, params);
 
     const [users] = await pool.execute(
-      'SELECT id, name, email, phone, role, active, created_at, updated_at FROM users WHERE id = ?', 
+      'SELECT id, userName as name, email, phoneNumber as phone, role, subscription as active, createdAt as created_at, updatedAt as updated_at FROM loginMaster WHERE id = ?', 
       [req.params.id]
     );
 
@@ -633,16 +671,16 @@ app.put('/api/users/:id', auth, async (req, res) => {
 // Activate/Deactivate user (superadmin only)
 app.patch('/api/users/:id/active', auth, async (req, res) => {
   try {
-    const [currentUsers] = await pool.execute('SELECT role FROM users WHERE id = ?', [req.userId]);
-    if (currentUsers.length === 0 || currentUsers[0].role !== 'superadmin') {
-      return res.status(403).json({ error: 'Only superadmin can change user status.' });
+    const [currentUsers] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
+    if (currentUsers.length === 0 || (currentUsers[0].role !== 'superadmin' && currentUsers[0].role !== 'mastersuperadmin')) {
+      return res.status(403).json({ error: 'Only superadmin or mastersuperadmin can change user status.' });
     }
 
     const { active } = req.body;
-    await pool.execute('UPDATE users SET active = ? WHERE id = ?', [active, req.params.id]);
+    await pool.execute('UPDATE loginMaster SET subscription = ? WHERE id = ?', [active ? 1 : 0, req.params.id]);
 
     const [users] = await pool.execute(
-      'SELECT id, name, email, phone, role, active, created_at, updated_at FROM users WHERE id = ?', 
+      'SELECT id, userName as name, email, phoneNumber as phone, role, subscription as active, createdAt as created_at, updatedAt as updated_at FROM loginMaster WHERE id = ?', 
       [req.params.id]
     );
 
@@ -662,17 +700,17 @@ app.patch('/api/users/:id/active', auth, async (req, res) => {
 // Delete user (superadmin only)
 app.delete('/api/users/:id', auth, async (req, res) => {
   try {
-    const [currentUsers] = await pool.execute('SELECT role FROM users WHERE id = ?', [req.userId]);
-    if (currentUsers.length === 0 || currentUsers[0].role !== 'superadmin') {
-      return res.status(403).json({ error: 'Only superadmin can delete users.' });
+    const [currentUsers] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
+    if (currentUsers.length === 0 || (currentUsers[0].role !== 'superadmin' && currentUsers[0].role !== 'mastersuperadmin')) {
+      return res.status(403).json({ error: 'Only superadmin or mastersuperadmin can delete users.' });
     }
 
-    const [users] = await pool.execute('SELECT email FROM users WHERE id = ?', [req.params.id]);
+    const [users] = await pool.execute('SELECT email FROM loginMaster WHERE id = ?', [req.params.id]);
     if (users.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    await pool.execute('DELETE FROM users WHERE id = ?', [req.params.id]);
+    await pool.execute('DELETE FROM loginMaster WHERE id = ?', [req.params.id]);
     res.status(200).json({ message: 'User deleted successfully', email: users[0].email });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete user', details: err.message });
@@ -791,7 +829,19 @@ app.get('/api/configuration/by-store/:storeId', async (req, res) => {
 // List all unique SQs for the user (now fetches from products table)
 app.get('/api/layerdesigns/sqs', auth, async (req, res) => {
   try {
-    const [products] = await pool.execute('SELECT DISTINCT productSku FROM products WHERE storeHash = ?', [req.storeHash]);
+    let query = 'SELECT DISTINCT productSku FROM products';
+    let params = [];
+    
+    // If user is mastersuperadmin, show all SQs from all storeHash
+    // If user is superadmin, show only their storeHash SQs
+    if (req.userRole === 'mastersuperadmin') {
+      // No WHERE clause needed for mastersuperadmin
+    } else {
+      query += ' WHERE storeHash = ?';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
     res.json(products.map(row => row.productSku));
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch SQs', details: err.message });
@@ -804,14 +854,38 @@ app.get('/api/layerdesigns/by-sq/:sq', auth, async (req, res) => {
     console.log('Fetching designs for SQ:', req.params.sq, 'User ID:', req.userId);
     
     // Find the product by SKU in the products table
-    const [products] = await pool.execute('SELECT * FROM products WHERE productSku = ? AND storeHash = ?', [req.params.sq, req.storeHash]);
+    let query = 'SELECT * FROM products WHERE productSku = ?';
+    let params = [req.params.sq];
+    
+    // If user is mastersuperadmin, can access any product
+    // If user is superadmin, can only access their storeHash products
+    if (req.userRole !== 'mastersuperadmin') {
+      query += ' AND storeHash = ?';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
     
     if (products.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
     
     const product = products[0];
-    console.log('Raw product from DB:', product);
+    
+    // Parse layerDesign object safely
+    let layerDesignObj = {};
+    if (product.layerDesign) {
+      try {
+        let cleanLayerDesign = product.layerDesign.toString().trim();
+        if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
+          cleanLayerDesign = cleanLayerDesign.slice(1, -1);
+        }
+        layerDesignObj = JSON.parse(cleanLayerDesign);
+      } catch (parseError) {
+        console.log('Error parsing layerDesign for product', product.id, ':', parseError.message);
+        layerDesignObj = {};
+      }
+    }
     
     // Parse tabSettings safely
     let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
@@ -827,42 +901,25 @@ app.get('/api/layerdesigns/by-sq/:sq', auth, async (req, res) => {
       }
     }
     
-    // Parse customizableData safely
-    let customizableData = [];
-    if (product.customizableData) {
-      try {
-        let cleanCustomizableData = product.customizableData.toString().trim();
-        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
-          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
-        }
-        customizableData = JSON.parse(cleanCustomizableData);
-      } catch (parseError) {
-        console.log('Error parsing customizableData for product', product.id, ':', parseError.message);
-      }
-    }
-    
-    // Create a design object that matches the expected format
-    const design = {
+    // Return single product with all designs in layerDesign
+    const singleProduct = {
       id: product.id,
-      user_id: req.userId,
+      userId: product.userId,
       sq: product.productSku,
-      design_name: product.designName || 'Default Design',
-      product_type: product.ProductType || '2d',
-      tab_settings: JSON.stringify(tabSettings),
-      layers_design: product.layerDesign ? JSON.stringify(product.layerDesign) : null,
-      customizable_data: JSON.stringify(customizableData),
-      created_at: product.createdAt,
-      updated_at: product.updatedAt,
-      // Add the formatted fields for frontend compatibility
-      designName: product.designName || 'Default Design',
+      productName: product.productName,
+      productImage: product.productImage,
       productType: product.ProductType || '2d',
       tabSettings: tabSettings,
-      layersDesign: product.layerDesign || null,
-      customizableData: customizableData
+      layerDesign: layerDesignObj, // Return parsed layerDesign object
+      customizerImage: product.customizerImage,
+      modelFile: product.modelFile,
+      visible: product.visible === 1,
+      createdAt: product.createdAt,
+      updatedAt: product.updatedAt
     };
     
-    console.log('Formatted design:', design);
-    res.json([design]); // Return as array to maintain compatibility
+    console.log('Returning single product with layerDesign:', singleProduct);
+    res.json(singleProduct); // Return single product
   } catch (err) {
     console.error('Error in by-sq endpoint:', err);
     res.status(500).json({ error: 'Failed to fetch LayerDesigns', details: err.message });
@@ -877,46 +934,68 @@ app.put('/api/products/:id', auth, async (req, res) => {
     const { tabSettings, productType, visible } = req.body;
     
     // Get current product data
-    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    let selectQuery = 'SELECT * FROM products WHERE id = ?';
+    let selectParams = [req.params.id];
+    
+    // If user is mastersuperadmin, allow access to any product
+    // If user is superadmin, restrict to their storeHash
+    if (req.userRole !== 'mastersuperadmin') {
+      selectQuery += ' AND storeHash = ?';
+      selectParams.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(selectQuery, selectParams);
     if (products.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
 
     let updateFields = [];
-    let params = [];
+    let updateParams = [];
     
     if (tabSettings !== undefined) {
       updateFields.push('tabSettings = ?');
       // Check if tabSettings is already a string or needs to be stringified
       const tabSettingsValue = typeof tabSettings === 'string' ? tabSettings : JSON.stringify(tabSettings);
-      params.push(tabSettingsValue);
+      updateParams.push(tabSettingsValue);
     }
     
     if (productType !== undefined) {
       updateFields.push('ProductType = ?');
-      params.push(productType);
+      updateParams.push(productType);
     }
     
     if (visible !== undefined) {
       updateFields.push('visible = ?');
-      params.push(visible ? 1 : 0);
+      updateParams.push(visible ? 1 : 0);
     }
     
     if (updateFields.length === 0) {
       return res.status(400).json({ error: 'No valid fields to update' });
     }
     
-    params.push(req.params.id);
-    params.push(req.storeHash);
+    updateParams.push(req.params.id);
+    
+    // Build UPDATE query with conditional storeHash restriction
+    let updateQuery = `UPDATE products SET ${updateFields.join(', ')} WHERE id = ?`;
+    if (req.userRole !== 'mastersuperadmin') {
+      updateQuery += ' AND storeHash = ?';
+      updateParams.push(req.storeHash);
+    }
     
     // Update the product
-    await pool.execute(
-      `UPDATE products SET ${updateFields.join(', ')} WHERE id = ? AND storeHash = ?`,
-      params
-    );
+    await pool.execute(updateQuery, updateParams);
 
     // Get the updated product to return
-    const [updatedProducts] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    let fetchQuery = 'SELECT * FROM products WHERE id = ?';
+    let fetchParams = [req.params.id];
+    
+    // Add storeHash restriction only for non-mastersuperadmin users
+    if (req.userRole !== 'mastersuperadmin') {
+      fetchQuery += ' AND storeHash = ?';
+      fetchParams.push(req.storeHash);
+    }
+    
+    const [updatedProducts] = await pool.execute(fetchQuery, fetchParams);
     const updatedProductData = updatedProducts[0];
     
     let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
@@ -967,58 +1046,120 @@ app.put('/api/products/:id', auth, async (req, res) => {
   }
 });
 
-// Create/Update Product design (for layer_designs endpoint compatibility)
+// Create/Update Product design (store in layerDesign object)
 app.post('/api/layerdesigns', auth, async (req, res) => {
   try {
     const { sq, designName, layersDesign, customizableData, productType, tabSettings } = req.body;
     console.log('Received data for new design:', req.body);
 
     // Find the product by SQ in the products table
-    const [products] = await pool.execute('SELECT * FROM products WHERE productSku = ? AND storeHash = ?', [sq, req.storeHash]);
+    let query = 'SELECT * FROM products WHERE productSku = ?';
+    let params = [sq];
+    
+    // If user is mastersuperadmin, allow access to any product
+    // If user is superadmin, restrict to their storeHash
+    if (req.userRole !== 'mastersuperadmin') {
+      query += ' AND storeHash = ?';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
 
     if (products.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
 
     const product = products[0];
-    let updateFields = [];
-    let params = [];
     
-    // Handle all possible fields that might be sent
-    if (designName !== undefined) {
-      updateFields.push('designName = ?');
-      params.push(designName);
-    }
-    
-    if (layersDesign !== undefined) {
-      updateFields.push('layerDesign = ?');
-      const layersDesignValue = typeof layersDesign === 'string' ? layersDesign : JSON.stringify(layersDesign);
-      params.push(layersDesignValue);
-    }
-    
-    if (customizableData !== undefined) {
-      updateFields.push('customizableData = ?');
-      const customizableDataValue = typeof customizableData === 'string' ? customizableData : JSON.stringify(customizableData);
-      params.push(customizableDataValue);
-    }
-    
-    if (productType !== undefined) {
-      updateFields.push('ProductType = ?');
-      params.push(productType);
-    }
-    
-    if (tabSettings !== undefined) {
-      updateFields.push('tabSettings = ?');
-      const tabSettingsValue = typeof tabSettings === 'string' ? tabSettings : JSON.stringify(tabSettings);
-      params.push(tabSettingsValue);
-    }
-    
-    // If no fields to update, return success (might be just a design creation request)
-    if (updateFields.length === 0) {
-      console.log('No fields to update, returning existing product data');
-      // Return the existing product data
+    // If designName is provided, add/update design in layerDesign object
+    if (designName && designName.trim()) {
+      // Parse existing layerDesign object
+      let layerDesignObj = {};
+      if (product.layerDesign) {
+        try {
+          let cleanLayerDesign = product.layerDesign.toString().trim();
+          if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
+            cleanLayerDesign = cleanLayerDesign.slice(1, -1);
+          }
+          layerDesignObj = JSON.parse(cleanLayerDesign);
+        } catch (parseError) {
+          console.log('Error parsing layerDesign for product', product.id, ':', parseError.message);
+          layerDesignObj = {};
+        }
+      }
+
+      // Check if design name already exists
+      if (layerDesignObj[designName.trim()]) {
+        return res.status(400).json({ error: 'Design with this name already exists for this product' });
+      }
+
+      // Add new design to layerDesign object - only design name and customizable data
+      layerDesignObj[designName.trim()] = customizableData || [];
+
+      // Update the product with new layerDesign object
+      let updateQuery = 'UPDATE products SET layerDesign = ? WHERE id = ?';
+      let updateParams = [JSON.stringify(layerDesignObj), product.id];
+      
+      // Add storeHash restriction only for non-mastersuperadmin users
+      if (req.userRole !== 'mastersuperadmin') {
+        updateQuery += ' AND storeHash = ?';
+        updateParams.push(req.storeHash);
+      }
+      
+      await pool.execute(updateQuery, updateParams);
+
+      // Get the updated product
+      const [updatedProducts] = await pool.execute('SELECT * FROM products WHERE id = ?', [product.id]);
+      const updatedProduct = updatedProducts[0];
+
+      // Parse JSON fields safely
       let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
       let customizableDataParsed = [];
+      
+      if (updatedProduct.tabSettings) {
+        try {
+          let cleanTabSettings = updatedProduct.tabSettings.toString().trim();
+          if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+            cleanTabSettings = cleanTabSettings.slice(1, -1);
+          }
+          tabSettingsParsed = JSON.parse(cleanTabSettings);
+        } catch (parseError) {
+          console.log('Error parsing tabSettings for product', updatedProduct.id, ':', parseError.message);
+        }
+      }
+      
+      if (updatedProduct.customizableData) {
+        try {
+          let cleanCustomizableData = updatedProduct.customizableData.toString().trim();
+          if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+            cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+          }
+          customizableDataParsed = JSON.parse(cleanCustomizableData);
+        } catch (parseError) {
+          console.log('Error parsing customizableData for product', updatedProduct.id, ':', parseError.message);
+        }
+      }
+
+      const createdDesign = {
+        id: updatedProduct.id,
+        sq: updatedProduct.productSku,
+        designName: designName.trim(),
+        productName: updatedProduct.productName,
+        productImage: updatedProduct.productImage,
+        productType: updatedProduct.ProductType || '2d',
+        tabSettings: tabSettingsParsed,
+        customizableData: customizableDataParsed,
+        layerDesign: layerDesignObj,
+        createdAt: updatedProduct.createdAt,
+        updatedAt: updatedProduct.updatedAt
+      };
+
+      return res.json({ message: 'Design created successfully', product: createdDesign });
+    } else {
+      // If no designName provided, return the product data
+      let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+      let customizableDataParsed = [];
+      let layerDesignParsed = {};
       
       if (product.tabSettings) {
         try {
@@ -1044,6 +1185,18 @@ app.post('/api/layerdesigns', auth, async (req, res) => {
         }
       }
 
+      if (product.layerDesign) {
+        try {
+          let cleanLayerDesign = product.layerDesign.toString().trim();
+          if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
+            cleanLayerDesign = cleanLayerDesign.slice(1, -1);
+          }
+          layerDesignParsed = JSON.parse(cleanLayerDesign);
+        } catch (parseError) {
+          console.log('Error parsing layerDesign for product', product.id, ':', parseError.message);
+        }
+      }
+
       const existingProduct = {
         id: product.id,
         sq: product.productSku,
@@ -1052,76 +1205,35 @@ app.post('/api/layerdesigns', auth, async (req, res) => {
         productType: product.ProductType || '2d',
         tabSettings: tabSettingsParsed,
         customizableData: customizableDataParsed,
+        layerDesign: layerDesignParsed,
         createdAt: product.createdAt,
         updatedAt: product.updatedAt
       };
 
       return res.json({ message: 'Product data retrieved successfully', product: existingProduct });
     }
-    
-    params.push(product.id);
-    
-    // Update the product
-    await pool.execute(
-      `UPDATE products SET ${updateFields.join(', ')} WHERE id = ?`,
-      params
-    );
-
-    // Get the updated product to return
-    const [updatedProducts] = await pool.execute('SELECT * FROM products WHERE id = ?', [product.id]);
-    const updatedProductData = updatedProducts[0];
-    
-    let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
-    let customizableDataParsed = [];
-    
-    // Safely parse tabSettings
-    if (updatedProductData.tabSettings) {
-      try {
-        let cleanTabSettings = updatedProductData.tabSettings.toString().trim();
-        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
-          cleanTabSettings = cleanTabSettings.slice(1, -1);
-        }
-        tabSettingsParsed = JSON.parse(cleanTabSettings);
-      } catch (parseError) {
-        console.log('Error parsing tabSettings for product', updatedProductData.id, ':', parseError.message);
-      }
-    }
-    
-    // Safely parse customizableData
-    if (updatedProductData.customizableData) {
-      try {
-        let cleanCustomizableData = updatedProductData.customizableData.toString().trim();
-        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
-          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
-        }
-        customizableDataParsed = JSON.parse(cleanCustomizableData);
-      } catch (parseError) {
-        console.log('Error parsing customizableData for product', updatedProductData.id, ':', parseError.message);
-      }
-    }
-
-    const updatedProduct = {
-      id: updatedProductData.id,
-      sq: updatedProductData.productSku,
-      productName: updatedProductData.productName,
-      productImage: updatedProductData.productImage,
-      productType: updatedProductData.ProductType || '2d',
-      tabSettings: tabSettingsParsed,
-      customizableData: customizableDataParsed,
-      createdAt: updatedProductData.createdAt,
-      updatedAt: updatedProductData.updatedAt
-    };
-
-    res.json({ message: 'Product updated successfully', product: updatedProduct });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to update Product', details: err.message });
+    console.error('Error creating design:', err);
+    res.status(500).json({ error: 'Failed to create design', details: err.message });
   }
 });
 
 // Get all Products for the logged-in user
 app.get('/api/layerdesigns', auth, async (req, res) => {
   try {
-    const [products] = await pool.execute('SELECT * FROM products WHERE storeHash = ? ORDER BY createdAt DESC', [req.storeHash]);
+    let query = 'SELECT * FROM products';
+    let params = [];
+    
+    // If user is mastersuperadmin, show all products from all storeHash
+    // If user is superadmin, show only their storeHash products
+    if (req.userRole === 'mastersuperadmin') {
+      query += ' ORDER BY createdAt DESC';
+    } else {
+      query += ' WHERE storeHash = ? ORDER BY createdAt DESC';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
     const formattedProducts = products.map(product => {
       let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
       let customizableData = [];
@@ -1179,14 +1291,24 @@ app.get('/api/layerdesigns', auth, async (req, res) => {
 // Get a single Product by ID
 app.get('/api/layerdesigns/:id', auth, async (req, res) => {
   try {
-    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    let query = 'SELECT * FROM products WHERE id = ?';
+    let params = [req.params.id];
+    
+    // If user is mastersuperadmin, allow access to any product
+    // If user is superadmin, restrict to their storeHash
+    if (req.userRole !== 'mastersuperadmin') {
+      query += ' AND storeHash = ?';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
     if (products.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
 
     const productData = products[0];
     let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
-    let customizableData = [];
+    let layerDesign = {};
     
     // Safely parse tabSettings
     if (productData.tabSettings) {
@@ -1201,16 +1323,16 @@ app.get('/api/layerdesigns/:id', auth, async (req, res) => {
       }
     }
     
-    // Safely parse customizableData
-    if (productData.customizableData) {
+    // Safely parse layerDesign
+    if (productData.layerDesign) {
       try {
-        let cleanCustomizableData = productData.customizableData.toString().trim();
-        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
-          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        let cleanLayerDesign = productData.layerDesign.toString().trim();
+        if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
+          cleanLayerDesign = cleanLayerDesign.slice(1, -1);
         }
-        customizableData = JSON.parse(cleanCustomizableData);
+        layerDesign = JSON.parse(cleanLayerDesign);
       } catch (parseError) {
-        console.log('Error parsing customizableData for product', productData.id, ':', parseError.message);
+        console.log('Error parsing layerDesign for product', productData.id, ':', parseError.message);
       }
     }
 
@@ -1221,7 +1343,7 @@ app.get('/api/layerdesigns/:id', auth, async (req, res) => {
       productImage: productData.productImage,
       productType: productData.ProductType || '2d',
       tabSettings: tabSettings,
-      customizableData: customizableData,
+      layerDesign: layerDesign,
       createdAt: productData.createdAt,
       updatedAt: productData.updatedAt
     };
@@ -1262,57 +1384,79 @@ app.put('/api/layerdesigns/:id', auth, async (req, res) => {
     const { sq, designName, layersDesign, customizableData, productType, tabSettings } = req.body;
     
     // Get current product data
-    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    let selectQuery = 'SELECT * FROM products WHERE id = ?';
+    let selectParams = [req.params.id];
+    
+    // If user is mastersuperadmin, allow access to any product
+    // If user is superadmin, restrict to their storeHash
+    if (req.userRole !== 'mastersuperadmin') {
+      selectQuery += ' AND storeHash = ?';
+      selectParams.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(selectQuery, selectParams);
     if (products.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
 
     let updateFields = [];
-    let params = [];
+    let updateParams = [];
     
     if (designName !== undefined) {
       updateFields.push('designName = ?');
-      params.push(designName);
+      updateParams.push(designName);
     }
     
     if (layersDesign !== undefined) {
       updateFields.push('layerDesign = ?');
       const layersDesignValue = typeof layersDesign === 'string' ? layersDesign : JSON.stringify(layersDesign);
-      params.push(layersDesignValue);
+      updateParams.push(layersDesignValue);
     }
     
     if (customizableData !== undefined) {
       updateFields.push('customizableData = ?');
       const customizableDataValue = typeof customizableData === 'string' ? customizableData : JSON.stringify(customizableData);
-      params.push(customizableDataValue);
+      updateParams.push(customizableDataValue);
     }
     
     if (productType !== undefined) {
       updateFields.push('ProductType = ?');
-      params.push(productType);
+      updateParams.push(productType);
     }
     
     if (tabSettings !== undefined) {
       updateFields.push('tabSettings = ?');
       const tabSettingsValue = typeof tabSettings === 'string' ? tabSettings : JSON.stringify(tabSettings);
-      params.push(tabSettingsValue);
+      updateParams.push(tabSettingsValue);
     }
     
     if (updateFields.length === 0) {
       return res.status(400).json({ error: 'No valid fields to update' });
     }
     
-    params.push(req.params.id);
-    params.push(req.storeHash);
+    updateParams.push(req.params.id);
+    
+    // Build UPDATE query with conditional storeHash restriction
+    let updateQuery = `UPDATE products SET ${updateFields.join(', ')} WHERE id = ?`;
+    if (req.userRole !== 'mastersuperadmin') {
+      updateQuery += ' AND storeHash = ?';
+      updateParams.push(req.storeHash);
+    }
     
     // Update the product
-    await pool.execute(
-      `UPDATE products SET ${updateFields.join(', ')} WHERE id = ? AND storeHash = ?`,
-      params
-    );
+    await pool.execute(updateQuery, updateParams);
 
     // Get the updated product to return
-    const [updatedProducts] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    let fetchQuery = 'SELECT * FROM products WHERE id = ?';
+    let fetchParams = [req.params.id];
+    
+    // Add storeHash restriction only for non-mastersuperadmin users
+    if (req.userRole !== 'mastersuperadmin') {
+      fetchQuery += ' AND storeHash = ?';
+      fetchParams.push(req.storeHash);
+    }
+    
+    const [updatedProducts] = await pool.execute(fetchQuery, fetchParams);
     const updatedProductData = updatedProducts[0];
     
     let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
@@ -1370,87 +1514,152 @@ app.put('/api/layerdesigns/:id', auth, async (req, res) => {
   }
 });
 
-// Delete a Product Design (clear design data but keep product)
+// Delete a Product Design (delete the design row)
 app.delete('/api/layerdesigns/:id', auth, async (req, res) => {
   try {
-    // Clear the design-related data but keep the product
-    const [result] = await pool.execute(
-      'UPDATE products SET designName = NULL, layerDesign = NULL, customizableData = "[]" WHERE id = ? AND storeHash = ?', 
-      [req.params.id, req.storeHash]
-    );
-    if (result.affectedRows === 0) {
+    // First check if this is a design (has designName) or the base product
+    let query = 'SELECT * FROM products WHERE id = ?';
+    let params = [req.params.id];
+    
+    // If user is mastersuperadmin, allow access to any product
+    // If user is superadmin, restrict to their storeHash
+    if (req.userRole !== 'mastersuperadmin') {
+      query += ' AND storeHash = ?';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
+    
+    if (products.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
-    res.json({ message: 'Product Design deleted successfully' });
+    
+    const product = products[0];
+    
+    // If this is a design (has designName), delete the entire row
+    if (product.designName && product.designName !== 'Default Design') {
+      let deleteQuery = 'DELETE FROM products WHERE id = ?';
+      let deleteParams = [req.params.id];
+      
+      // Add storeHash restriction only for non-mastersuperadmin users
+      if (req.userRole !== 'mastersuperadmin') {
+        deleteQuery += ' AND storeHash = ?';
+        deleteParams.push(req.storeHash);
+      }
+      
+      const [result] = await pool.execute(deleteQuery, deleteParams);
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ error: 'Design not found' });
+      }
+      res.json({ message: 'Product Design deleted successfully' });
+    } else {
+      // If this is the base product, just clear the design data
+      let updateQuery = 'UPDATE products SET designName = NULL, layerDesign = NULL, customizableData = "[]" WHERE id = ?';
+      let updateParams = [req.params.id];
+      
+      // Add storeHash restriction only for non-mastersuperadmin users
+      if (req.userRole !== 'mastersuperadmin') {
+        updateQuery += ' AND storeHash = ?';
+        updateParams.push(req.storeHash);
+      }
+      
+      const [result] = await pool.execute(updateQuery, updateParams);
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ error: 'Product not found' });
+      }
+      res.json({ message: 'Product Design cleared successfully' });
+    }
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete Product Design', details: err.message });
   }
 });
 
-// Add customizable data to a Product (updated to work with products table)
+// Add customizable data to a Product (organized by design names in layerDesign)
 app.post('/api/layerdesigns/:id/customize', auth, async (req, res) => {
   try {
-    const { title, shortDescription, files } = req.body;
+    const { title, shortDescription, files, designName } = req.body;
     
-    // Get current customizable data from products table
-    const [products] = await pool.execute('SELECT customizableData FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
+    // Get current product data
+    let query = 'SELECT * FROM products WHERE id = ?';
+    let params = [req.params.id];
+    
+    // If user is mastersuperadmin, allow access to any product
+    // If user is superadmin, restrict to their storeHash
+    if (req.userRole !== 'mastersuperadmin') {
+      query += ' AND storeHash = ?';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
     if (products.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
 
-    // Parse current customizable data safely
-    let currentData = [];
-    if (products[0].customizableData) {
+    const product = products[0];
+    
+    // Parse current layerDesign object safely
+    let layerDesignObj = {};
+    if (product.layerDesign) {
       try {
-        let cleanCustomizableData = products[0].customizableData.toString().trim();
-        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
-          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        let cleanLayerDesign = product.layerDesign.toString().trim();
+        if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
+          cleanLayerDesign = cleanLayerDesign.slice(1, -1);
         }
-        currentData = JSON.parse(cleanCustomizableData);
+        layerDesignObj = JSON.parse(cleanLayerDesign);
       } catch (parseError) {
-        console.log('Error parsing customizableData for product', req.params.id, ':', parseError.message);
-        currentData = [];
+        console.log('Error parsing layerDesign for product', req.params.id, ':', parseError.message);
+        layerDesignObj = {};
       }
     }
 
-    // Add new customizable data
-    currentData.push({ title, shortDescription, files });
+    // Use designName as key, or default to 'default' if not provided
+    const designKey = designName || 'default';
+    
+    // Initialize design if it doesn't exist
+    if (!layerDesignObj[designKey]) {
+      layerDesignObj[designKey] = [];
+    }
 
-    // Update the product with new customizable data
-    await pool.execute(
-      'UPDATE products SET customizableData = ? WHERE id = ? AND storeHash = ?',
-      [JSON.stringify(currentData), req.params.id, req.storeHash]
-    );
+    // Add new customizable data to the specific design
+    layerDesignObj[designKey].push({ title, shortDescription, files });
+
+    // Update the product with new layerDesign object
+    let updateQuery = 'UPDATE products SET layerDesign = ? WHERE id = ?';
+    let updateParams = [JSON.stringify(layerDesignObj), req.params.id];
+    
+    // Add storeHash restriction only for non-mastersuperadmin users
+    if (req.userRole !== 'mastersuperadmin') {
+      updateQuery += ' AND storeHash = ?';
+      updateParams.push(req.storeHash);
+    }
+    
+    await pool.execute(updateQuery, updateParams);
 
     // Get the updated product
-    const [updatedProducts] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [req.params.id, req.storeHash]);
-    const updatedProduct = updatedProducts[0];
+    let fetchQuery = 'SELECT * FROM products WHERE id = ?';
+    let fetchParams = [req.params.id];
     
-    // Parse the updated data safely
-    let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
-    let customizableData = [];
-    
-    if (updatedProduct.tabSettings) {
-      try {
-        let cleanTabSettings = updatedProduct.tabSettings.toString().trim();
-        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
-          cleanTabSettings = cleanTabSettings.slice(1, -1);
-        }
-        tabSettings = JSON.parse(cleanTabSettings);
-      } catch (parseError) {
-        console.log('Error parsing tabSettings for product', updatedProduct.id, ':', parseError.message);
-      }
+    // Add storeHash restriction only for non-mastersuperadmin users
+    if (req.userRole !== 'mastersuperadmin') {
+      fetchQuery += ' AND storeHash = ?';
+      fetchParams.push(req.storeHash);
     }
     
-    if (updatedProduct.customizableData) {
+    const [updatedProducts] = await pool.execute(fetchQuery, fetchParams);
+    const updatedProduct = updatedProducts[0];
+    
+    // Parse the updated layerDesign object safely
+    let updatedLayerDesignObj = {};
+    if (updatedProduct.layerDesign) {
       try {
-        let cleanCustomizableData = updatedProduct.customizableData.toString().trim();
-        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
-          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        let cleanLayerDesign = updatedProduct.layerDesign.toString().trim();
+        if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
+          cleanLayerDesign = cleanLayerDesign.slice(1, -1);
         }
-        customizableData = JSON.parse(cleanCustomizableData);
+        updatedLayerDesignObj = JSON.parse(cleanLayerDesign);
       } catch (parseError) {
-        console.log('Error parsing customizableData for product', updatedProduct.id, ':', parseError.message);
+        console.log('Error parsing updated layerDesign for product', updatedProduct.id, ':', parseError.message);
+        updatedLayerDesignObj = {};
       }
     }
 
@@ -1459,22 +1668,22 @@ app.post('/api/layerdesigns/:id/customize', auth, async (req, res) => {
       id: updatedProduct.id,
       user_id: req.userId,
       sq: updatedProduct.productSku,
-      design_name: updatedProduct.designName || 'Default Design',
+      design_name: designName || 'default',
       product_type: updatedProduct.ProductType || '2d',
-      tab_settings: JSON.stringify(tabSettings),
+      tab_settings: JSON.stringify({"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true}),
       layers_design: updatedProduct.layerDesign ? JSON.stringify(updatedProduct.layerDesign) : null,
-      customizable_data: JSON.stringify(customizableData),
+      customizable_data: JSON.stringify(updatedLayerDesignObj[designKey] || []),
       created_at: updatedProduct.createdAt,
       updated_at: updatedProduct.updatedAt,
       // Add the formatted fields for frontend compatibility
-      designName: updatedProduct.designName || 'Default Design',
+      designName: designName || 'default',
       productType: updatedProduct.ProductType || '2d',
-      tabSettings: tabSettings,
+      tabSettings: {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true},
       layersDesign: updatedProduct.layerDesign || null,
-      customizableData: customizableData
+      customizableData: updatedLayerDesignObj[designKey] || []
     };
 
-    res.json({ message: 'Customizable data added', layerDesign });
+    res.json({ message: 'Customizable data added successfully', layerDesign });
   } catch (err) {
     res.status(500).json({ error: 'Failed to add customizable data', details: err.message });
   }
@@ -1666,8 +1875,8 @@ cron.schedule('0 0 * * *', async () => {
 app.post('/api/deactivate-expired-subscriptions', auth, async (req, res) => {
   try {
     const [currentUsers] = await pool.execute('SELECT role FROM loginMaster WHERE id = ?', [req.userId]);
-    if (currentUsers.length === 0 || currentUsers[0].role !== 'superadmin') {
-      return res.status(403).json({ error: 'Only superadmin can perform this action.' });
+    if (currentUsers.length === 0 || (currentUsers[0].role !== 'superadmin' && currentUsers[0].role !== 'mastersuperadmin')) {
+      return res.status(403).json({ error: 'Only superadmin or mastersuperadmin can perform this action.' });
     }
 
     const now = new Date();
@@ -1687,13 +1896,130 @@ app.post('/api/deactivate-expired-subscriptions', auth, async (req, res) => {
   }
 });
 
+// SUBSCRIPTION MANAGEMENT APIs (MasterSuperAdmin only)
+
+// Get all subscriptions with storeHash info
+app.get('/api/subscription-management', auth, requireMasterSuperAdmin, async (req, res) => {
+  try {
+    // Get all users from loginMaster except mastersuperadmin
+    const [users] = await pool.execute(`
+      SELECT 
+        id,
+        email,
+        userName,
+        storeHash,
+        subscription as isActive,
+        role,
+        createdAt,
+        updatedAt
+      FROM loginMaster 
+      WHERE role != 'mastersuperadmin'
+      ORDER BY updatedAt DESC
+    `);
+
+    res.status(200).json(users);
+  } catch (err) {
+    console.error('Error fetching users for subscription management:', err);
+    res.status(500).json({ error: 'Failed to fetch users', details: err.message });
+  }
+});
+
+// Toggle subscription status by storeHash
+app.post('/api/subscription-management/toggle', auth, requireMasterSuperAdmin, async (req, res) => {
+  try {
+    const { storeHash, isActive } = req.body;
+    const now = new Date();
+
+    if (!storeHash) {
+      return res.status(400).json({ error: 'storeHash is required' });
+    }
+
+    // Update loginMaster table subscription field
+    await pool.execute(
+      'UPDATE loginMaster SET subscription = ?, updatedAt = ? WHERE storeHash = ?',
+      [isActive ? 1 : 0, now, storeHash]
+    );
+
+    // Also update or insert into subscriptions table for history tracking
+    const [existingSubscription] = await pool.execute(
+      'SELECT * FROM subscriptions WHERE storeHash = ?',
+      [storeHash]
+    );
+
+    if (existingSubscription.length > 0) {
+      // Update existing subscription record
+      await pool.execute(
+        'UPDATE subscriptions SET isActive = ?, updatedAt = ? WHERE storeHash = ?',
+        [isActive ? 1 : 0, now, storeHash]
+      );
+    } else {
+      // Insert new subscription record for history
+      await pool.execute(
+        'INSERT INTO subscriptions (storeHash, isActive, updatedAt) VALUES (?, ?, ?)',
+        [storeHash, isActive ? 1 : 0, now]
+      );
+    }
+
+    // Get updated user data
+    const [updatedUser] = await pool.execute(`
+      SELECT 
+        id,
+        email,
+        userName,
+        storeHash,
+        subscription as isActive,
+        role,
+        createdAt,
+        updatedAt
+      FROM loginMaster 
+      WHERE storeHash = ?
+    `, [storeHash]);
+
+    res.status(200).json({
+      message: `Subscription ${isActive ? 'activated' : 'deactivated'} successfully`,
+      user: updatedUser[0],
+      updatedAt: now
+    });
+  } catch (err) {
+    console.error('Error toggling subscription:', err);
+    res.status(500).json({ error: 'Failed to toggle subscription', details: err.message });
+  }
+});
+
+// Get subscription history for a specific storeHash
+app.get('/api/subscription-management/history/:storeHash', auth, requireMasterSuperAdmin, async (req, res) => {
+  try {
+    const { storeHash } = req.params;
+
+    const [history] = await pool.execute(
+      'SELECT * FROM subscriptions WHERE storeHash = ? ORDER BY updatedAt DESC',
+      [storeHash]
+    );
+
+    res.status(200).json(history);
+  } catch (err) {
+    console.error('Error fetching subscription history:', err);
+    res.status(500).json({ error: 'Failed to fetch subscription history', details: err.message });
+  }
+});
+
 // Upload customizer image for a product
 app.post('/api/products/:id/customizer-image', auth, upload.single('image'), async (req, res) => {
   try {
     const { id } = req.params;
     
     // Check if product exists and belongs to user
-    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    let query = 'SELECT * FROM products WHERE id = ?';
+    let params = [id];
+    
+    // If user is mastersuperadmin, allow access to any product
+    // If user is superadmin, restrict to their storeHash
+    if (req.userRole !== 'mastersuperadmin') {
+      query += ' AND storeHash = ?';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
     if (products.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
@@ -1719,10 +2045,16 @@ app.post('/api/products/:id/customizer-image', auth, upload.single('image'), asy
     });
 
     // Update product with customizer image URL
-    await pool.execute(
-      'UPDATE products SET customizerImage = ? WHERE id = ? AND storeHash = ?',
-      [result.secure_url, id, req.storeHash]
-    );
+    let updateQuery = 'UPDATE products SET customizerImage = ? WHERE id = ?';
+    let updateParams = [result.secure_url, id];
+    
+    // Add storeHash restriction only for non-mastersuperadmin users
+    if (req.userRole !== 'mastersuperadmin') {
+      updateQuery += ' AND storeHash = ?';
+      updateParams.push(req.storeHash);
+    }
+    
+    await pool.execute(updateQuery, updateParams);
 
     res.status(200).json({ 
       message: 'Customizer image uploaded successfully',
@@ -1742,16 +2074,32 @@ app.put('/api/products/:id/customizer-image', auth, async (req, res) => {
     const { customizerImage } = req.body;
     
     // Check if product exists and belongs to user
-    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    let query = 'SELECT * FROM products WHERE id = ?';
+    let params = [id];
+    
+    // If user is mastersuperadmin, allow access to any product
+    // If user is superadmin, restrict to their storeHash
+    if (req.userRole !== 'mastersuperadmin') {
+      query += ' AND storeHash = ?';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
     if (products.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
 
     // Update product with customizer image URL (or null to remove)
-    await pool.execute(
-      'UPDATE products SET customizerImage = ? WHERE id = ? AND storeHash = ?',
-      [customizerImage, id, req.storeHash]
-    );
+    let updateQuery = 'UPDATE products SET customizerImage = ? WHERE id = ?';
+    let updateParams = [customizerImage, id];
+    
+    // Add storeHash restriction only for non-mastersuperadmin users
+    if (req.userRole !== 'mastersuperadmin') {
+      updateQuery += ' AND storeHash = ?';
+      updateParams.push(req.storeHash);
+    }
+    
+    await pool.execute(updateQuery, updateParams);
 
     res.status(200).json({ 
       message: customizerImage ? 'Customizer image updated successfully' : 'Customizer image removed successfully',
@@ -1770,7 +2118,17 @@ app.post('/api/products/:id/3d-model', auth, upload.single('model'), async (req,
     const { id } = req.params;
     
     // Check if product exists and belongs to user
-    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    let query = 'SELECT * FROM products WHERE id = ?';
+    let params = [id];
+    
+    // If user is mastersuperadmin, allow access to any product
+    // If user is superadmin, restrict to their storeHash
+    if (req.userRole !== 'mastersuperadmin') {
+      query += ' AND storeHash = ?';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
     if (products.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
@@ -1801,10 +2159,16 @@ app.post('/api/products/:id/3d-model', auth, upload.single('model'), async (req,
     });
 
     // Update product with 3D model URL
-    await pool.execute(
-      'UPDATE products SET modelFile = ? WHERE id = ? AND storeHash = ?',
-      [result.secure_url, id, req.storeHash]
-    );
+    let updateQuery = 'UPDATE products SET modelFile = ? WHERE id = ?';
+    let updateParams = [result.secure_url, id];
+    
+    // Add storeHash restriction only for non-mastersuperadmin users
+    if (req.userRole !== 'mastersuperadmin') {
+      updateQuery += ' AND storeHash = ?';
+      updateParams.push(req.storeHash);
+    }
+    
+    await pool.execute(updateQuery, updateParams);
 
     res.status(200).json({ 
       message: '3D model uploaded successfully',
@@ -1825,16 +2189,32 @@ app.put('/api/products/:id/3d-model', auth, async (req, res) => {
     const { modelFile } = req.body;
     
     // Check if product exists and belongs to user
-    const [products] = await pool.execute('SELECT * FROM products WHERE id = ? AND storeHash = ?', [id, req.storeHash]);
+    let query = 'SELECT * FROM products WHERE id = ?';
+    let params = [id];
+    
+    // If user is mastersuperadmin, allow access to any product
+    // If user is superadmin, restrict to their storeHash
+    if (req.userRole !== 'mastersuperadmin') {
+      query += ' AND storeHash = ?';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
     if (products.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
 
     // Update product with 3D model URL (or null to remove)
-    await pool.execute(
-      'UPDATE products SET modelFile = ? WHERE id = ? AND storeHash = ?',
-      [modelFile, id, req.storeHash]
-    );
+    let updateQuery = 'UPDATE products SET modelFile = ? WHERE id = ?';
+    let updateParams = [modelFile, id];
+    
+    // Add storeHash restriction only for non-mastersuperadmin users
+    if (req.userRole !== 'mastersuperadmin') {
+      updateQuery += ' AND storeHash = ?';
+      updateParams.push(req.storeHash);
+    }
+    
+    await pool.execute(updateQuery, updateParams);
 
     res.status(200).json({ 
       message: modelFile ? '3D model updated successfully' : '3D model removed successfully',
@@ -1885,6 +2265,7 @@ app.get('/api/developer/product', async (req, res) => {
     // Parse JSON fields safely
     let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
     let customizableData = [];
+    let layerDesign = {};
     
     if (product.tabSettings) {
       try {
@@ -1910,6 +2291,18 @@ app.get('/api/developer/product', async (req, res) => {
       }
     }
 
+    if (product.layerDesign) {
+      try {
+        let cleanLayerDesign = product.layerDesign.toString().trim();
+        if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
+          cleanLayerDesign = cleanLayerDesign.slice(1, -1);
+        }
+        layerDesign = JSON.parse(cleanLayerDesign);
+      } catch (parseError) {
+        console.log('Error parsing layerDesign for product', product.id, ':', parseError.message);
+      }
+    }
+
     // Return product data excluding specified fields
     const responseData = {
       status: true,
@@ -1920,7 +2313,7 @@ app.get('/api/developer/product', async (req, res) => {
         customizerImage: product.customizerImage,
         modelFile: product.modelFile,
         designName: product.designName,
-        layerDesign: product.layerDesign
+        layerDesign: layerDesign
       }
     };
 
@@ -1928,6 +2321,108 @@ app.get('/api/developer/product', async (req, res) => {
 
   } catch (err) {
     console.error('Error fetching product for developer:', err);
+    res.status(500).json({ 
+      status: false,
+      error: 'Failed to fetch product data', 
+      details: err.message 
+    });
+  }
+});
+
+// Developer API to fetch product data by SQ (productSku) and storeHash
+app.get('/api/developer/product-by-sq', async (req, res) => {
+  try {
+    const { sq, storeHash } = req.query;
+    
+    if (!sq || !storeHash) {
+      return res.status(400).json({ 
+        status: false,
+        error: 'sq and storeHash are required' 
+      });
+    }
+
+    // Fetch product data by SQ
+    const [products] = await pool.execute(
+      'SELECT * FROM products WHERE productSku = ? AND storeHash = ?', 
+      [sq, storeHash]
+    );
+
+    if (products.length === 0) {
+      return res.status(404).json({ 
+        status: false,
+        error: 'Product not found' 
+      });
+    }
+
+    const product = products[0];
+
+    // Check if product is visible
+    if (product.visible !== 1) {
+      return res.status(404).json({ 
+        status: false,
+        error: 'Product is not visible' 
+      });
+    }
+
+    // Parse JSON fields safely
+    let tabSettings = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
+    let customizableData = [];
+    let layerDesign = {};
+    
+    if (product.tabSettings) {
+      try {
+        let cleanTabSettings = product.tabSettings.toString().trim();
+        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
+          cleanTabSettings = cleanTabSettings.slice(1, -1);
+        }
+        tabSettings = JSON.parse(cleanTabSettings);
+      } catch (parseError) {
+        console.log('Error parsing tabSettings for product', product.id, ':', parseError.message);
+      }
+    }
+    
+    if (product.customizableData) {
+      try {
+        let cleanCustomizableData = product.customizableData.toString().trim();
+        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
+          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
+        }
+        customizableData = JSON.parse(cleanCustomizableData);
+      } catch (parseError) {
+        console.log('Error parsing customizableData for product', product.id, ':', parseError.message);
+      }
+    }
+
+    if (product.layerDesign) {
+      try {
+        let cleanLayerDesign = product.layerDesign.toString().trim();
+        if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
+          cleanLayerDesign = cleanLayerDesign.slice(1, -1);
+        }
+        layerDesign = JSON.parse(cleanLayerDesign);
+      } catch (parseError) {
+        console.log('Error parsing layerDesign for product', product.id, ':', parseError.message);
+      }
+    }
+
+    // Return product data excluding specified fields
+    const responseData = {
+      status: true,
+      data: {
+        ProductType: product.ProductType || '2d',
+        tabSettings: tabSettings,
+        customizableData: customizableData,
+        customizerImage: product.customizerImage,
+        modelFile: product.modelFile,
+        designName: product.designName,
+        layerDesign: layerDesign
+      }
+    };
+
+    res.status(200).json(responseData);
+
+  } catch (err) {
+    console.error('Error fetching product by SQ for developer:', err);
     res.status(500).json({ 
       status: false,
       error: 'Failed to fetch product data', 
