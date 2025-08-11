@@ -23,16 +23,17 @@ app.use(express.json());
 
 // MySQL Connection Pool
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || '13.201.29.82',
-  user: process.env.DB_USER || 'admin_customiser',
+  host: process.env.DB_HOST || '13.127.89.144',
+  user: process.env.DB_USER || 'admin_custmiser',
   password: process.env.DB_PASSWORD || 'Chirag@2025',
-  database: process.env.DB_NAME || 'admin_customiser',
+  database: process.env.DB_NAME || 'admin_custmiser',
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
   acquireTimeout: 60000,
   timeout: 60000,
 });
+
 
 // Database Tables Creation
 const createTables = async () => {
@@ -874,13 +875,17 @@ app.get('/api/layerdesigns/by-sq/:sq', auth, async (req, res) => {
     
     // Parse layerDesign object safely
     let layerDesignObj = {};
+    console.log('Raw layerDesign from DB:', product.layerDesign);
     if (product.layerDesign) {
       try {
         let cleanLayerDesign = product.layerDesign.toString().trim();
         if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
           cleanLayerDesign = cleanLayerDesign.slice(1, -1);
         }
-        layerDesignObj = JSON.parse(cleanLayerDesign);
+        const parsed = JSON.parse(cleanLayerDesign);
+        // Ensure it's an object, not an array
+        layerDesignObj = Array.isArray(parsed) ? {} : parsed;
+        console.log('Parsed layerDesign object:', layerDesignObj);
       } catch (parseError) {
         console.log('Error parsing layerDesign for product', product.id, ':', parseError.message);
         layerDesignObj = {};
@@ -1081,7 +1086,9 @@ app.post('/api/layerdesigns', auth, async (req, res) => {
           if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
             cleanLayerDesign = cleanLayerDesign.slice(1, -1);
           }
-          layerDesignObj = JSON.parse(cleanLayerDesign);
+          const parsed = JSON.parse(cleanLayerDesign);
+          // Ensure it's an object, not an array
+          layerDesignObj = Array.isArray(parsed) ? {} : parsed;
         } catch (parseError) {
           console.log('Error parsing layerDesign for product', product.id, ':', parseError.message);
           layerDesignObj = {};
@@ -1095,6 +1102,10 @@ app.post('/api/layerdesigns', auth, async (req, res) => {
 
       // Add new design to layerDesign object - only design name and customizable data
       layerDesignObj[designName.trim()] = customizableData || [];
+      
+      console.log('Updated layerDesign object:', layerDesignObj);
+      console.log('Product ID:', product.id);
+      console.log('Design name:', designName.trim());
 
       // Update the product with new layerDesign object
       let updateQuery = 'UPDATE products SET layerDesign = ? WHERE id = ?';
@@ -1106,117 +1117,26 @@ app.post('/api/layerdesigns', auth, async (req, res) => {
         updateParams.push(req.storeHash);
       }
       
+      console.log('Update query:', updateQuery);
+      console.log('Update params:', updateParams);
+      
       await pool.execute(updateQuery, updateParams);
+      console.log('Database updated successfully');
 
-      // Get the updated product
-      const [updatedProducts] = await pool.execute('SELECT * FROM products WHERE id = ?', [product.id]);
-      const updatedProduct = updatedProducts[0];
-
-      // Parse JSON fields safely
-      let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
-      let customizableDataParsed = [];
-      
-      if (updatedProduct.tabSettings) {
-        try {
-          let cleanTabSettings = updatedProduct.tabSettings.toString().trim();
-          if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
-            cleanTabSettings = cleanTabSettings.slice(1, -1);
-          }
-          tabSettingsParsed = JSON.parse(cleanTabSettings);
-        } catch (parseError) {
-          console.log('Error parsing tabSettings for product', updatedProduct.id, ':', parseError.message);
-        }
-      }
-      
-      if (updatedProduct.customizableData) {
-        try {
-          let cleanCustomizableData = updatedProduct.customizableData.toString().trim();
-          if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
-            cleanCustomizableData = cleanCustomizableData.slice(1, -1);
-          }
-          customizableDataParsed = JSON.parse(cleanCustomizableData);
-        } catch (parseError) {
-          console.log('Error parsing customizableData for product', updatedProduct.id, ':', parseError.message);
-        }
-      }
-
-      const createdDesign = {
-        id: updatedProduct.id,
-        sq: updatedProduct.productSku,
+      res.status(201).json({ 
+        message: 'Design created successfully',
         designName: designName.trim(),
-        productName: updatedProduct.productName,
-        productImage: updatedProduct.productImage,
-        productType: updatedProduct.ProductType || '2d',
-        tabSettings: tabSettingsParsed,
-        customizableData: customizableDataParsed,
-        layerDesign: layerDesignObj,
-        createdAt: updatedProduct.createdAt,
-        updatedAt: updatedProduct.updatedAt
-      };
-
-      return res.json({ message: 'Design created successfully', product: createdDesign });
-    } else {
-      // If no designName provided, return the product data
-      let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
-      let customizableDataParsed = [];
-      let layerDesignParsed = {};
-      
-      if (product.tabSettings) {
-        try {
-          let cleanTabSettings = product.tabSettings.toString().trim();
-          if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
-            cleanTabSettings = cleanTabSettings.slice(1, -1);
-          }
-          tabSettingsParsed = JSON.parse(cleanTabSettings);
-        } catch (parseError) {
-          console.log('Error parsing tabSettings for product', product.id, ':', parseError.message);
-        }
-      }
-      
-      if (product.customizableData) {
-        try {
-          let cleanCustomizableData = product.customizableData.toString().trim();
-          if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
-            cleanCustomizableData = cleanCustomizableData.slice(1, -1);
-          }
-          customizableDataParsed = JSON.parse(cleanCustomizableData);
-        } catch (parseError) {
-          console.log('Error parsing customizableData for product', product.id, ':', parseError.message);
-        }
-      }
-
-      if (product.layerDesign) {
-        try {
-          let cleanLayerDesign = product.layerDesign.toString().trim();
-          if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
-            cleanLayerDesign = cleanLayerDesign.slice(1, -1);
-          }
-          layerDesignParsed = JSON.parse(cleanLayerDesign);
-        } catch (parseError) {
-          console.log('Error parsing layerDesign for product', product.id, ':', parseError.message);
-        }
-      }
-
-      const existingProduct = {
-        id: product.id,
-        sq: product.productSku,
-        productName: product.productName,
-        productImage: product.productImage,
-        productType: product.ProductType || '2d',
-        tabSettings: tabSettingsParsed,
-        customizableData: customizableDataParsed,
-        layerDesign: layerDesignParsed,
-        createdAt: product.createdAt,
-        updatedAt: product.updatedAt
-      };
-
-      return res.json({ message: 'Product data retrieved successfully', product: existingProduct });
-    }
-  } catch (err) {
-    console.error('Error creating design:', err);
-    res.status(500).json({ error: 'Failed to create design', details: err.message });
-  }
-});
+        productId: product.id,
+        layerDesign: layerDesignObj
+      });
+     } else {
+       res.status(400).json({ error: 'Design name is required' });
+     }
+   } catch (err) {
+     console.error('Error creating design:', err);
+     res.status(500).json({ error: 'Failed to create design', details: err.message });
+   }
+ });
 
 // Get all Products for the logged-in user
 app.get('/api/layerdesigns', auth, async (req, res) => {
@@ -1378,10 +1298,10 @@ app.delete('/api/layerdesigns/by-sq/:sq', auth, requireSuperAdmin, async (req, r
   }
 });
 
-// Update a Product design (edit design name, layersDesign, productType, tabSettings)
+// Update a Product design (edit design name within layerDesign object)
 app.put('/api/layerdesigns/:id', auth, async (req, res) => {
   try {
-    const { sq, designName, layersDesign, customizableData, productType, tabSettings } = req.body;
+    const { sq, designName, newDesignName, customizableData } = req.body;
     
     // Get current product data
     let selectQuery = 'SELECT * FROM products WHERE id = ?';
@@ -1399,125 +1319,72 @@ app.put('/api/layerdesigns/:id', auth, async (req, res) => {
       return res.status(404).json({ error: 'Product not found' });
     }
 
-    let updateFields = [];
-    let updateParams = [];
+    const product = products[0];
     
-    if (designName !== undefined) {
-      updateFields.push('designName = ?');
-      updateParams.push(designName);
-    }
-    
-    if (layersDesign !== undefined) {
-      updateFields.push('layerDesign = ?');
-      const layersDesignValue = typeof layersDesign === 'string' ? layersDesign : JSON.stringify(layersDesign);
-      updateParams.push(layersDesignValue);
-    }
-    
-    if (customizableData !== undefined) {
-      updateFields.push('customizableData = ?');
-      const customizableDataValue = typeof customizableData === 'string' ? customizableData : JSON.stringify(customizableData);
-      updateParams.push(customizableDataValue);
-    }
-    
-    if (productType !== undefined) {
-      updateFields.push('ProductType = ?');
-      updateParams.push(productType);
-    }
-    
-    if (tabSettings !== undefined) {
-      updateFields.push('tabSettings = ?');
-      const tabSettingsValue = typeof tabSettings === 'string' ? tabSettings : JSON.stringify(tabSettings);
-      updateParams.push(tabSettingsValue);
-    }
-    
-    if (updateFields.length === 0) {
-      return res.status(400).json({ error: 'No valid fields to update' });
-    }
-    
-    updateParams.push(req.params.id);
-    
-    // Build UPDATE query with conditional storeHash restriction
-    let updateQuery = `UPDATE products SET ${updateFields.join(', ')} WHERE id = ?`;
-    if (req.userRole !== 'mastersuperadmin') {
-      updateQuery += ' AND storeHash = ?';
-      updateParams.push(req.storeHash);
-    }
-    
-    // Update the product
-    await pool.execute(updateQuery, updateParams);
-
-    // Get the updated product to return
-    let fetchQuery = 'SELECT * FROM products WHERE id = ?';
-    let fetchParams = [req.params.id];
-    
-    // Add storeHash restriction only for non-mastersuperadmin users
-    if (req.userRole !== 'mastersuperadmin') {
-      fetchQuery += ' AND storeHash = ?';
-      fetchParams.push(req.storeHash);
-    }
-    
-    const [updatedProducts] = await pool.execute(fetchQuery, fetchParams);
-    const updatedProductData = updatedProducts[0];
-    
-    let tabSettingsParsed = {"aiEditor": true, "imageEdit": true, "textEdit": true, "colors": true, "clipart": true};
-    let customizableDataParsed = [];
-    
-    // Safely parse tabSettings
-    if (updatedProductData.tabSettings) {
+    // Parse existing layerDesign object
+    let layerDesignObj = {};
+    if (product.layerDesign) {
       try {
-        let cleanTabSettings = updatedProductData.tabSettings.toString().trim();
-        if (cleanTabSettings.startsWith("'") && cleanTabSettings.endsWith("'")) {
-          cleanTabSettings = cleanTabSettings.slice(1, -1);
+        let cleanLayerDesign = product.layerDesign.toString().trim();
+        if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
+          cleanLayerDesign = cleanLayerDesign.slice(1, -1);
         }
-        tabSettingsParsed = JSON.parse(cleanTabSettings);
+        layerDesignObj = JSON.parse(cleanLayerDesign);
       } catch (parseError) {
-        console.log('Error parsing tabSettings for product', updatedProductData.id, ':', parseError.message);
-      }
-    }
-    
-    // Safely parse customizableData
-    if (updatedProductData.customizableData) {
-      try {
-        let cleanCustomizableData = updatedProductData.customizableData.toString().trim();
-        if (cleanCustomizableData.startsWith("'") && cleanCustomizableData.endsWith("'")) {
-          cleanCustomizableData = cleanCustomizableData.slice(1, -1);
-        }
-        customizableDataParsed = JSON.parse(cleanCustomizableData);
-      } catch (parseError) {
-        console.log('Error parsing customizableData for product', updatedProductData.id, ':', parseError.message);
+        console.log('Error parsing layerDesign for product', product.id, ':', parseError.message);
+        layerDesignObj = {};
       }
     }
 
-    // Create a layerDesign object that matches the expected format
-    const layerDesign = {
-      id: updatedProductData.id,
-      user_id: req.userId,
-      sq: updatedProductData.productSku,
-      design_name: updatedProductData.designName || 'Default Design',
-      product_type: updatedProductData.ProductType || '2d',
-      tab_settings: JSON.stringify(tabSettingsParsed),
-      layers_design: updatedProductData.layerDesign ? JSON.stringify(updatedProductData.layerDesign) : null,
-      customizable_data: JSON.stringify(customizableDataParsed),
-      created_at: updatedProductData.createdAt,
-      updated_at: updatedProductData.updatedAt,
-      // Add the formatted fields for frontend compatibility
-      designName: updatedProductData.designName || 'Default Design',
-      productType: updatedProductData.ProductType || '2d',
-      tabSettings: tabSettingsParsed,
-      layersDesign: updatedProductData.layerDesign || null,
-      customizableData: customizableDataParsed
-    };
+    // If designName is provided, update the design name
+    if (designName && newDesignName && designName !== newDesignName) {
+      // Check if new design name already exists
+      if (layerDesignObj[newDesignName.trim()]) {
+        return res.status(400).json({ error: 'Design with this name already exists' });
+      }
 
-    res.json({ message: 'LayerDesign updated', layerDesign });
+      // Move data from old design name to new design name
+      if (layerDesignObj[designName]) {
+        layerDesignObj[newDesignName.trim()] = layerDesignObj[designName];
+        delete layerDesignObj[designName];
+      }
+
+      // Update the product with new layerDesign object
+      let updateQuery = 'UPDATE products SET layerDesign = ? WHERE id = ?';
+      let updateParams = [JSON.stringify(layerDesignObj), product.id];
+      
+      // Add storeHash restriction only for non-mastersuperadmin users
+      if (req.userRole !== 'mastersuperadmin') {
+        updateQuery += ' AND storeHash = ?';
+        updateParams.push(req.storeHash);
+      }
+      
+      await pool.execute(updateQuery, updateParams);
+
+      res.json({ 
+        message: 'Design updated successfully',
+        oldDesignName: designName,
+        newDesignName: newDesignName.trim()
+      });
+    } else {
+      res.status(400).json({ error: 'Both designName and newDesignName are required for update' });
+    }
   } catch (err) {
-    res.status(500).json({ error: 'Failed to update LayerDesign', details: err.message });
+    console.error('Error updating design:', err);
+    res.status(500).json({ error: 'Failed to update design', details: err.message });
   }
 });
 
-// Delete a Product Design (delete the design row)
+// Delete a Product Design (remove design from layerDesign object)
 app.delete('/api/layerdesigns/:id', auth, async (req, res) => {
   try {
-    // First check if this is a design (has designName) or the base product
+    const { designName } = req.body;
+    
+    if (!designName) {
+      return res.status(400).json({ error: 'Design name is required for deletion' });
+    }
+    
+    // Get current product data
     let query = 'SELECT * FROM products WHERE id = ?';
     let params = [req.params.id];
     
@@ -1536,48 +1403,127 @@ app.delete('/api/layerdesigns/:id', auth, async (req, res) => {
     
     const product = products[0];
     
-    // If this is a design (has designName), delete the entire row
-    if (product.designName && product.designName !== 'Default Design') {
-      let deleteQuery = 'DELETE FROM products WHERE id = ?';
-      let deleteParams = [req.params.id];
-      
-      // Add storeHash restriction only for non-mastersuperadmin users
-      if (req.userRole !== 'mastersuperadmin') {
-        deleteQuery += ' AND storeHash = ?';
-        deleteParams.push(req.storeHash);
+    // Parse existing layerDesign object
+    let layerDesignObj = {};
+    if (product.layerDesign) {
+      try {
+        let cleanLayerDesign = product.layerDesign.toString().trim();
+        if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
+          cleanLayerDesign = cleanLayerDesign.slice(1, -1);
+        }
+        layerDesignObj = JSON.parse(cleanLayerDesign);
+      } catch (parseError) {
+        console.log('Error parsing layerDesign for product', product.id, ':', parseError.message);
+        layerDesignObj = {};
       }
-      
-      const [result] = await pool.execute(deleteQuery, deleteParams);
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ error: 'Design not found' });
-      }
-      res.json({ message: 'Product Design deleted successfully' });
-    } else {
-      // If this is the base product, just clear the design data
-      let updateQuery = 'UPDATE products SET designName = NULL, layerDesign = NULL, customizableData = "[]" WHERE id = ?';
-      let updateParams = [req.params.id];
-      
-      // Add storeHash restriction only for non-mastersuperadmin users
-      if (req.userRole !== 'mastersuperadmin') {
-        updateQuery += ' AND storeHash = ?';
-        updateParams.push(req.storeHash);
-      }
-      
-      const [result] = await pool.execute(updateQuery, updateParams);
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ error: 'Product not found' });
-      }
-      res.json({ message: 'Product Design cleared successfully' });
     }
+    
+    // Check if design exists
+    if (!layerDesignObj[designName]) {
+      return res.status(404).json({ error: 'Design not found' });
+    }
+    
+    // Remove the design from layerDesign object
+    delete layerDesignObj[designName];
+    
+    // Update the product with new layerDesign object
+    let updateQuery = 'UPDATE products SET layerDesign = ? WHERE id = ?';
+    let updateParams = [JSON.stringify(layerDesignObj), product.id];
+    
+    // Add storeHash restriction only for non-mastersuperadmin users
+    if (req.userRole !== 'mastersuperadmin') {
+      updateQuery += ' AND storeHash = ?';
+      updateParams.push(req.storeHash);
+    }
+    
+    await pool.execute(updateQuery, updateParams);
+    
+    res.json({ 
+      message: 'Design deleted successfully',
+      deletedDesignName: designName
+    });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to delete Product Design', details: err.message });
+    console.error('Error deleting design:', err);
+    res.status(500).json({ error: 'Failed to delete design', details: err.message });
+  }
+});
+
+// Delete customizable data from a Product
+app.delete('/api/layerdesigns/:id/customize', auth, async (req, res) => {
+  try {
+    const { designName, deleteIndex } = req.body;
+    
+    // Get current product data
+    let query = 'SELECT * FROM products WHERE id = ?';
+    let params = [req.params.id];
+    
+    // If user is mastersuperadmin, allow access to any product
+    // If user is superadmin, restrict to their storeHash
+    if (req.userRole !== 'mastersuperadmin') {
+      query += ' AND storeHash = ?';
+      params.push(req.storeHash);
+    }
+    
+    const [products] = await pool.execute(query, params);
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const product = products[0];
+    
+    // Parse current layerDesign object safely
+    let layerDesignObj = {};
+    if (product.layerDesign) {
+      try {
+        let cleanLayerDesign = product.layerDesign.toString().trim();
+        if (cleanLayerDesign.startsWith("'") && cleanLayerDesign.endsWith("'")) {
+          cleanLayerDesign = cleanLayerDesign.slice(1, -1);
+        }
+        layerDesignObj = JSON.parse(cleanLayerDesign);
+      } catch (parseError) {
+        console.log('Error parsing layerDesign for product', req.params.id, ':', parseError.message);
+        layerDesignObj = {};
+      }
+    }
+
+    // Use designName as key, or default to 'default' if not provided
+    const designKey = designName || 'default';
+    
+    // Check if design exists and has the item to delete
+    if (!layerDesignObj[designKey] || !layerDesignObj[designKey][deleteIndex]) {
+      return res.status(400).json({ error: 'Item not found for deletion' });
+    }
+
+    // Remove the item at the specified index
+    layerDesignObj[designKey].splice(deleteIndex, 1);
+
+    // Update the product with updated layerDesign object
+    let updateQuery = 'UPDATE products SET layerDesign = ? WHERE id = ?';
+    let updateParams = [JSON.stringify(layerDesignObj), req.params.id];
+    
+    // Add storeHash restriction only for non-mastersuperadmin users
+    if (req.userRole !== 'mastersuperadmin') {
+      updateQuery += ' AND storeHash = ?';
+      updateParams.push(req.storeHash);
+    }
+    
+    await pool.execute(updateQuery, updateParams);
+
+    res.status(200).json({ 
+      message: 'Customizable data deleted successfully',
+      remainingItems: layerDesignObj[designKey].length
+    });
+
+  } catch (err) {
+    console.error('Error deleting customizable data:', err);
+    res.status(500).json({ error: 'Failed to delete customizable data', details: err.message });
   }
 });
 
 // Add customizable data to a Product (organized by design names in layerDesign)
 app.post('/api/layerdesigns/:id/customize', auth, async (req, res) => {
   try {
-    const { title, shortDescription, files, designName } = req.body;
+    const { title, shortDescription, price, files, designName, editIndex } = req.body;
     
     // Get current product data
     let query = 'SELECT * FROM products WHERE id = ?';
@@ -1620,8 +1566,18 @@ app.post('/api/layerdesigns/:id/customize', auth, async (req, res) => {
       layerDesignObj[designKey] = [];
     }
 
-    // Add new customizable data to the specific design
-    layerDesignObj[designKey].push({ title, shortDescription, files });
+    // Handle edit or add operation
+    if (editIndex !== null && editIndex !== undefined) {
+      // Update existing item
+      if (layerDesignObj[designKey][editIndex]) {
+        layerDesignObj[designKey][editIndex] = { title, shortDescription, price, files };
+      } else {
+        return res.status(400).json({ error: 'Invalid edit index' });
+      }
+    } else {
+      // Add new customizable data to the specific design
+      layerDesignObj[designKey].push({ title, shortDescription, price, files });
+    }
 
     // Update the product with new layerDesign object
     let updateQuery = 'UPDATE products SET layerDesign = ? WHERE id = ?';
@@ -1940,25 +1896,11 @@ app.post('/api/subscription-management/toggle', auth, requireMasterSuperAdmin, a
       [isActive ? 1 : 0, now, storeHash]
     );
 
-    // Also update or insert into subscriptions table for history tracking
-    const [existingSubscription] = await pool.execute(
-      'SELECT * FROM subscriptions WHERE storeHash = ?',
-      [storeHash]
+    // Always insert a new record into subscriptions table for history tracking
+    await pool.execute(
+      'INSERT INTO subscriptions (storeHash, isActive, updatedAt) VALUES (?, ?, ?)',
+      [storeHash, isActive ? 1 : 0, now]
     );
-
-    if (existingSubscription.length > 0) {
-      // Update existing subscription record
-      await pool.execute(
-        'UPDATE subscriptions SET isActive = ?, updatedAt = ? WHERE storeHash = ?',
-        [isActive ? 1 : 0, now, storeHash]
-      );
-    } else {
-      // Insert new subscription record for history
-      await pool.execute(
-        'INSERT INTO subscriptions (storeHash, isActive, updatedAt) VALUES (?, ?, ?)',
-        [storeHash, isActive ? 1 : 0, now]
-      );
-    }
 
     // Get updated user data
     const [updatedUser] = await pool.execute(`
@@ -1992,11 +1934,25 @@ app.get('/api/subscription-management/history/:storeHash', auth, requireMasterSu
     const { storeHash } = req.params;
 
     const [history] = await pool.execute(
-      'SELECT * FROM subscriptions WHERE storeHash = ? ORDER BY updatedAt DESC',
+      'SELECT id, storeHash, isActive, updatedAt FROM subscriptions WHERE storeHash = ? ORDER BY updatedAt DESC',
       [storeHash]
     );
 
-    res.status(200).json(history);
+    // Format the history data for better readability
+    const formattedHistory = history.map(record => ({
+      id: record.id,
+      storeHash: record.storeHash,
+      status: record.isActive ? 'Active' : 'Inactive',
+      isActive: record.isActive,
+      changedAt: record.updatedAt,
+      action: record.isActive ? 'Activated' : 'Deactivated'
+    }));
+
+    res.status(200).json({
+      storeHash,
+      totalChanges: history.length,
+      history: formattedHistory
+    });
   } catch (err) {
     console.error('Error fetching subscription history:', err);
     res.status(500).json({ error: 'Failed to fetch subscription history', details: err.message });
@@ -2148,6 +2104,8 @@ app.post('/api/products/:id/3d-model', auth, upload.single('model'), async (req,
         {
           folder: '3d-models',
           resource_type: 'raw', // For model files like .glb, .obj, etc.
+          public_id: `${Date.now()}_${req.file.originalname.replace(/\.[^/.]+$/, '')}`, // Preserve original filename without extension
+          format: req.file.originalname.split('.').pop(), // Preserve file extension
         },
         (error, result) => {
           if (error) reject(error);
