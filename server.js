@@ -1570,13 +1570,13 @@ app.post('/api/layerdesigns/:id/customize', auth, async (req, res) => {
     if (editIndex !== null && editIndex !== undefined) {
       // Update existing item
       if (layerDesignObj[designKey][editIndex]) {
-        layerDesignObj[designKey][editIndex] = { title, shortDescription, price, files };
+        layerDesignObj[designKey][editIndex] = { title, shortDescription, price: price || 0.0, files };
       } else {
         return res.status(400).json({ error: 'Invalid edit index' });
       }
     } else {
       // Add new customizable data to the specific design
-      layerDesignObj[designKey].push({ title, shortDescription, price, files });
+      layerDesignObj[designKey].push({ title, shortDescription, price: price || 0.0, files });
     }
 
     // Update the product with new layerDesign object
