@@ -23,10 +23,10 @@ app.use(express.json());
 
 // MySQL Connection Pool
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || '13.127.89.144',
-  user: process.env.DB_USER || 'admin_custmiser',
+  host: process.env.DB_HOST || '13.201.29.82',
+  user: process.env.DB_USER || 'admin_customiser',
   password: process.env.DB_PASSWORD || 'Chirag@2025',
-  database: process.env.DB_NAME || 'admin_custmiser',
+  database: process.env.DB_NAME || 'admin_customiser',
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
@@ -331,8 +331,9 @@ async function requireMasterSuperAdmin(req, res, next) {
 // POST endpoint to save product customization
 app.post('/api/save-product', async (req, res) => {
   try {
+    // Save any JSON data to productSaved table
     const [result] = await pool.execute(
-      'INSERT INTO products (product_data) VALUES (?)',
+      'INSERT INTO productSaved (product_data) VALUES (?)',
       [JSON.stringify(req.body)]
     );
     res.status(201).json({ 
